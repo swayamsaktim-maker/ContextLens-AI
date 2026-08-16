@@ -165,6 +165,7 @@ export async function POST(request: Request) {
     matchingWords.length >= 4;
         return hasStrongMatch;
     });
+     
 
     const factChecksFound = relevantFactChecks.length;
     const hasFactCheckEvidence = factChecksFound > 0;
