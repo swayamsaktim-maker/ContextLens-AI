@@ -1,32 +1,36 @@
 "use client";
 
+import Image from "next/image";
 import { useState } from "react";
 import { createWorker } from "tesseract.js";
 
 type AnalysisData = {
   verdict: string;
   confidence: number;
+  confidenceLabel: string;
   explanation: string;
   imageContext: string;
+  extractedTextAvailable: boolean;
 
   totalRatedFactChecks: number;
   evidenceAgreement: number;
-
   factChecksFound: number;
+
   factCheckEvidence: {
     claim: string;
     publisher: string;
     title: string;
     rating: string;
     url: string;
+    relevance: number;
   }[];
-
 
   articles: {
     title: string;
     description: string | null;
     url: string;
     source: string;
+    relevance: number;
   }[];
 };
 
@@ -158,9 +162,12 @@ export default function Home() {
 
               {image ? (
                 <div className="mt-3 overflow-hidden rounded-2xl border border-zinc-200">
-                  <img
+                  <Image
                     src={image}
                     alt="Analyzed claim"
+                    width={800}
+                    height={500}
+                    unoptimized
                     className="max-h-64 w-full object-contain bg-zinc-50"
                   />
                 </div>
@@ -221,13 +228,15 @@ export default function Home() {
             )}
 
             <p className="mt-4 text-zinc-600">
-              {analysisData?.verdict?.toUpperCase() === "VERIFIED"
-                ? "This claim is supported by multiple relevant sources and has been verified based on the available evidence."
-                : analysisData?.verdict?.toUpperCase() === "LIKELY TRUE"
-                ? "The available evidence strongly supports this claim."
+              {analysisData?.verdict?.toUpperCase() === "SUPPORTED"
+                ? "Relevant published fact-checks support this claim, although the result should still be understood in the context of the available evidence."
+                : analysisData?.verdict?.toUpperCase() === "MISLEADING"
+                ? "Relevant fact-checks indicate that this claim is misleading, partially false, or missing important context."
+                : analysisData?.verdict?.toUpperCase() === "FALSE"
+                ? "Relevant published fact-checks indicate that this claim is false."
                 : analysisData?.verdict?.toUpperCase() === "UNCERTAIN"
-                ? "More reliable evidence is needed before reaching a strong conclusion."
-                : "There is not enough reliable evidence to verify this claim."}
+                ? "The available evidence is conflicting or insufficient for a strong conclusion."
+                : "No sufficiently relevant published fact-check evidence was found. This does not mean the claim is true or false."}
             </p>
 
             <div className="mt-8 rounded-2xl bg-zinc-50 p-5">
@@ -237,6 +246,10 @@ export default function Home() {
 
               <p className="mt-1 text-3xl font-semibold">
                 {analysisData?.confidence ?? 0}%
+                <p className="mt-2 text-xs leading-5 text-zinc-500">
+                  {analysisData?.confidenceLabel ||
+                    "Evidence confidence reflects the strength and agreement of retrieved evidence, not the mathematical probability that the claim is true."}
+                </p>
               </p>
             </div>
 
@@ -254,8 +267,8 @@ export default function Home() {
                   </p>
                 ) : (
                   <p className="mt-2 text-sm leading-6 text-zinc-600">
-                    No published fact-check was found. The result is based on relevant
-                    real-time sources instead.
+                  No published fact-check was found. Related real-time sources were found,
+but they are not treated as proof that the claim is true.
                   </p>
                 )}
               </div>
@@ -267,7 +280,7 @@ export default function Home() {
                 </p>
 
                 <div className="mt-3 space-y-3">
-                  {analysisData.articles.map((article: any, index: number) => (
+                  {analysisData.articles.map((article, index) => (
                     <a
                       key={index}
                       href={article.url}
@@ -289,26 +302,45 @@ export default function Home() {
             )}
 
 
-            <div className="mt-6">
-              <p className="text-sm font-medium">
-                Trusted sources
-              </p>
+            {analysisData && (
+              <div className="mt-6">
+                <p className="text-sm font-medium">
+                  Evidence sources
+                </p>
 
-              <div className="mt-3 flex flex-wrap gap-2">
-                <span className="rounded-full border border-zinc-200 px-3 py-2 text-sm">
-                  WHO
-                </span>
+                {analysisData.factCheckEvidence.length > 0 ? (
+                  <>
+                    <p className="mt-1 text-sm text-zinc-500">
+                      These publishers returned relevant fact-check evidence for this
+                      claim.
+                    </p>
 
-                <span className="rounded-full border border-zinc-200 px-3 py-2 text-sm">
-                  PubMed
-                </span>
-
-                <span className="rounded-full border border-zinc-200 px-3 py-2 text-sm">
-                  Nature
-                </span>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {Array.from(
+                        new Set(
+                          analysisData.factCheckEvidence
+                            .map((item) => item.publisher)
+                            .filter(Boolean)
+                        )
+                      ).map((publisher) => (
+                        <span
+                          key={publisher}
+                          className="rounded-full border border-zinc-200 px-3 py-2 text-sm"
+                        >
+                          {publisher}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <p className="mt-2 text-sm leading-6 text-zinc-500">
+                    No relevant published fact-check publisher was found for this claim.
+                    Related news sources, if available, are shown separately and are not
+                    treated as proof of truth.
+                  </p>
+                )}
               </div>
-            </div>
-
+            )}
             {analysisData && analysisData.factCheckEvidence.length > 0 && (
               <div className="mt-8">
                 <p className="text-sm font-semibold text-zinc-900">
@@ -430,9 +462,12 @@ export default function Home() {
 
           {image && (
             <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-200">
-              <img
+              <Image
                 src={image}
                 alt="Uploaded claim"
+                width={800}
+                height={500}
+                unoptimized
                 className="max-h-72 w-full object-contain bg-zinc-50"
               />
             </div>
