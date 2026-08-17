@@ -24,21 +24,42 @@ function relevance(claim: string, text: string, title = ""): number {
   return Math.min(100, Math.round((matches / c.length) * 70 + (titleMatches / c.length) * 30));
 }
 
-// Score the fact-checked proposition itself. F1 penalizes unrelated extra terms,
-// so a fact-check about "Modi's first OBC PM status" cannot become evidence for
-// the different claim "Modi is PM of India" merely because the names overlap.
+// Fact-check search results are often about a related claim, not the exact
+// proposition the user entered. Compare the checked proposition itself and
+// penalize distinctive extra concepts so keyword overlap cannot masquerade as
+// evidence for a different claim.
 function factCheckRelevance(claim: string, checkedClaim: string, title: string): number {
-  const c = words(claim), e = new Set(words(checkedClaim)), t = new Set(words(title));
-  if (!c.length || !e.size) return 0;
-  const overlap = c.filter((w) => e.has(w)).length;
-  const claimCoverage = overlap / new Set(c).size;
-  const evidenceCoverage = overlap / e.size;
+  const c = words(claim), e = words(checkedClaim), t = new Set(words(title));
+  const cSet = new Set(c), eSet = new Set(e);
+  if (!cSet.size || !eSet.size) return 0;
+
+  const overlap = [...cSet].filter((w) => eSet.has(w)).length;
+  const claimCoverage = overlap / cSet.size;
+  const evidenceCoverage = overlap / eSet.size;
   const f1 = claimCoverage + evidenceCoverage > 0
-    ? (2 * claimCoverage * evidenceCoverage) / (claimCoverage + evidenceCoverage) : 0;
-  const titleCoverage = c.filter((w) => t.has(w)).length / new Set(c).size;
+    ? (2 * claimCoverage * evidenceCoverage) / (claimCoverage + evidenceCoverage)
+    : 0;
+  const titleCoverage = [...cSet].filter((w) => t.has(w)).length / cSet.size;
+
   let score = f1 * 70 + titleCoverage * 30;
-  const extraRatio = (e.size - overlap) / e.size;
-  if (extraRatio > 0.45 && claimCoverage < 0.9) score -= 20;
+
+  // Distinctive concepts in the checked claim matter. For example,
+  // "first OBC prime minister" is a different proposition from
+  // "prime minister of India", even though both contain "Narendra Modi".
+  const distinctiveExtras = [...eSet].filter((w) => !cSet.has(w));
+  const extraRatio = distinctiveExtras.length / eSet.size;
+  if (extraRatio > 0.30 && claimCoverage < 1) score -= 20;
+
+  // A fact-check containing a scope-changing modifier absent from the user's
+  // claim should not be allowed to determine the verdict.
+  const scopeModifiers = new Set([
+    "first", "second", "only", "former", "future", "candidate", "minister",
+    "president", "chief", "obc", "sc", "st", "caste", "election", "elected",
+    "resigned", "arrested", "convicted", "born", "died", "wife", "son", "daughter",
+  ]);
+  const conflictingModifiers = distinctiveExtras.filter((w) => scopeModifiers.has(w));
+  if (conflictingModifiers.length > 0) score -= 25;
+
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
@@ -80,8 +101,10 @@ export async function POST(request: Request) {
       const checkedClaim = String(fc.text || "").trim();
       const title = String(review.title || "").trim();
       const score = factCheckRelevance(claim, checkedClaim, title);
-      // Conservative threshold: only close proposition matches can affect the verdict.
-      if (score >= 70) factChecks.push({ claim: checkedClaim || claim, publisher: review.publisher?.name || "Unknown publisher", title: title || "No title available", rating: review.textualRating || "No rating available", url: review.url || "", relevance: score });
+      // Require a close proposition match before fact-check evidence can affect
+      // the verdict. Related-topic matches are displayed neither as evidence nor
+      // as a reason for classifying the claim.
+      if (score >= 80) factChecks.push({ claim: checkedClaim || claim, publisher: review.publisher?.name || "Unknown publisher", title: title || "No title available", rating: review.textualRating || "No rating available", url: review.url || "", relevance: score });
     }
 
     let falseCount = 0, trueCount = 0, misleadingCount = 0;
