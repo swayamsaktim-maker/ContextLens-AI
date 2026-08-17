@@ -171,6 +171,8 @@ function rating(value: string): RatingType {
     .replace(/\s+/g, " ")
     .trim();
 
+  if (!normalized) return "unknown";
+
   if (
     [
       "mostly false",
@@ -193,8 +195,7 @@ function rating(value: string): RatingType {
     normalized.includes("false") ||
     normalized.includes("baseless") ||
     normalized.includes("incorrect") ||
-    normalized.includes("wrong") ||
-    normalized.includes("no evidence")
+    normalized.includes("wrong")
   ) {
     return "false";
   }
@@ -468,12 +469,11 @@ export async function POST(request: Request) {
         if (seenFactChecks.has(key)) continue;
         seenFactChecks.add(key);
 
-        const explicitRating = String(review.textualRating || "").trim();
         factChecks.push({
           claim: checkedClaim || claim,
           publisher: review.publisher?.name || "Unknown publisher",
           title: title || "No title available",
-          rating: explicitRating,
+          rating: String(review.textualRating || "").trim(),
           url,
           relevance: score,
         });
@@ -482,13 +482,15 @@ export async function POST(request: Request) {
 
     factChecks.sort((a, b) => b.relevance - a.relevance);
 
-    const unrated = factChecks.filter((factCheck) => !rating(factCheck.rating));
+    const unrated = factChecks.filter((factCheck) => rating(factCheck.rating) === "unknown");
     if (unrated.length) {
       const inferredRatings = await Promise.all(
         unrated.slice(0, 6).map((factCheck) => inferRatingFromPage(factCheck.url))
       );
       inferredRatings.forEach((inferred, index) => {
-        if (inferred !== "unknown") unrated[index].rating = inferred === "false" ? "False" : inferred === "true" ? "True" : "Misleading";
+        if (inferred === "false") unrated[index].rating = "False";
+        if (inferred === "true") unrated[index].rating = "True";
+        if (inferred === "misleading") unrated[index].rating = "Misleading";
       });
     }
 
@@ -541,12 +543,9 @@ export async function POST(request: Request) {
     } else if (authoritativeNews.length) {
       evidenceType = "authoritative-source";
       verdict = "VERIFIED";
-      confidence = clampPercent(
-        70 +
-          authoritativeNews.slice(0, 3).reduce((sum, article) => sum + article.relevance, 0) /
-            Math.max(1, authoritativeNews.slice(0, 3).length) *
-            0.2
-      );
+      const topAuthority = authoritativeNews.slice(0, 3);
+      const averageAuthorityRelevance = topAuthority.reduce((sum, article) => sum + article.relevance, 0) / Math.max(1, topAuthority.length);
+      confidence = clampPercent(70 + averageAuthorityRelevance * 0.2);
       explanation = "Relevant authoritative-source coverage was found. ContextLens AI treats this as stronger evidence than general news, but it is not a dedicated fact-check.";
     } else if (factChecks.length) {
       evidenceType = "fact-check-unrated";
@@ -554,17 +553,9 @@ export async function POST(request: Request) {
       explanation = "Relevant published fact-check pages were found, but their machine-readable ratings could not be confirmed. The claim remains unverified rather than being treated as proven.";
     } else if (articles.length) {
       evidenceType = "news";
-      confidence = clampPercent(
-        Math.min(
-          40,
-          Math.max(
-            20,
-            articles.slice(0, 5).reduce((sum, article) => sum + article.relevance, 0) /
-              Math.max(1, articles.slice(0, 5).length) *
-              0.5
-          )
-        )
-      );
+      const topArticles = articles.slice(0, 5);
+      const averageNewsRelevance = topArticles.reduce((sum, article) => sum + article.relevance, 0) / Math.max(1, topArticles.length);
+      confidence = clampPercent(Math.min(40, Math.max(20, averageNewsRelevance * 0.5)));
       explanation = "Related news coverage was found, but no sufficiently relevant published fact-check or authoritative source was found. News coverage alone is not treated as proof that the claim is true.";
     }
 
