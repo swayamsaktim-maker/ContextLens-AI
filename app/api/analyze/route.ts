@@ -25,8 +25,10 @@ type AuthoritySource = {
   relevance: number;
 };
 
+type RatingType = "false" | "true" | "misleading" | "unknown";
+
 const STOP = new Set(
-  "this that these those there their about with from have will would could should been being into than then they them what when where which while whose your ours ourselves the and for are was were has had can its our you but who how why is am be to of in on as at by an or a confirmed relevant published related source sources evidence claim claims no not"
+  "this that these those there their about with from have will would could should been being into than then they them what when where which while whose your ours ourselves the and for are was were has had can its our you but who how why is am be to of in on as at by an or a confirmed relevant published related source sources evidence claim claims"
     .split(" ")
 );
 
@@ -43,6 +45,8 @@ const NEGATIONS = new Set([
   "won't",
   "cannot",
   "can't",
+  "doesnt",
+  "doesn't",
 ]);
 
 const AUTHORITATIVE_DOMAINS = [
@@ -76,13 +80,13 @@ function words(text: string): string[] {
     .toLowerCase()
     .replace(/[^\w\s']/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP.has(w))
-    .map((w) => {
-      if (w.endsWith("ies") && w.length > 4) return `${w.slice(0, -3)}y`;
-      if (w.endsWith("ing") && w.length > 5) return w.slice(0, -3);
-      if (w.endsWith("ed") && w.length > 4) return w.slice(0, -2);
-      if (w.endsWith("s") && w.length > 4) return w.slice(0, -1);
-      return w;
+    .filter((word) => word.length > 2 && !STOP.has(word))
+    .map((word) => {
+      if (word.endsWith("ies") && word.length > 4) return `${word.slice(0, -3)}y`;
+      if (word.endsWith("ing") && word.length > 5) return word.slice(0, -3);
+      if (word.endsWith("ed") && word.length > 4) return word.slice(0, -2);
+      if (word.endsWith("s") && word.length > 4) return word.slice(0, -1);
+      return word;
     });
 }
 
@@ -92,45 +96,42 @@ function hasNegation(text: string): boolean {
 }
 
 function relevance(claim: string, text: string, title = ""): number {
-  const c = words(claim);
-  const e = new Set(words(text));
-  const t = new Set(words(title));
-  if (!c.length) return 0;
+  const claimWords = words(claim);
+  const evidenceWords = new Set(words(text));
+  const titleWords = new Set(words(title));
+  if (!claimWords.length) return 0;
 
-  const matches = c.filter((w) => e.has(w)).length;
-  const titleMatches = c.filter((w) => t.has(w)).length;
+  const bodyMatches = claimWords.filter((word) => evidenceWords.has(word)).length;
+  const titleMatches = claimWords.filter((word) => titleWords.has(word)).length;
 
   return Math.min(
     100,
-    Math.round((matches / c.length) * 70 + (titleMatches / c.length) * 30)
+    Math.round(
+      (bodyMatches / claimWords.length) * 70 +
+        (titleMatches / claimWords.length) * 30
+    )
   );
 }
 
-function factCheckRelevance(
-  claim: string,
-  checkedClaim: string,
-  title: string
-): number {
-  const c = new Set(words(claim));
-  const e = new Set(words(checkedClaim));
-  const t = new Set(words(title));
-  if (!c.size || !e.size) return 0;
+function factCheckRelevance(claim: string, checkedClaim: string, title: string): number {
+  const claimWords = new Set(words(claim));
+  const checkedWords = new Set(words(checkedClaim));
+  const titleWords = new Set(words(title));
+  if (!claimWords.size || !checkedWords.size) return 0;
 
-  const overlap = [...c].filter((w) => e.has(w)).length;
-  const claimCoverage = overlap / c.size;
-  const evidenceCoverage = overlap / e.size;
+  const overlap = [...claimWords].filter((word) => checkedWords.has(word)).length;
+  const claimCoverage = overlap / claimWords.size;
+  const evidenceCoverage = overlap / checkedWords.size;
   const f1 =
     claimCoverage + evidenceCoverage > 0
-      ? (2 * claimCoverage * evidenceCoverage) /
-        (claimCoverage + evidenceCoverage)
+      ? (2 * claimCoverage * evidenceCoverage) / (claimCoverage + evidenceCoverage)
       : 0;
   const titleCoverage =
-    [...c].filter((w) => t.has(w)).length / c.size;
+    [...claimWords].filter((word) => titleWords.has(word)).length / claimWords.size;
 
   let score = f1 * 70 + titleCoverage * 30;
-
-  const distinctiveExtras = [...e].filter((w) => !c.has(w));
-  const extraRatio = distinctiveExtras.length / e.size;
+  const distinctiveExtras = [...checkedWords].filter((word) => !claimWords.has(word));
+  const extraRatio = distinctiveExtras.length / checkedWords.size;
   if (extraRatio > 0.3 && claimCoverage < 1) score -= 15;
 
   const scopeModifiers = new Set([
@@ -159,16 +160,12 @@ function factCheckRelevance(
     "daughter",
   ]);
 
-  const conflictingModifiers = distinctiveExtras.filter((w) =>
-    scopeModifiers.has(w)
-  );
-  if (conflictingModifiers.length > 0) score -= 25;
-
+  if (distinctiveExtras.some((word) => scopeModifiers.has(word))) score -= 25;
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-function rating(value: string): "false" | "true" | "misleading" | "unknown" {
-  const r = value
+function rating(value: string): RatingType {
+  const normalized = value
     .toLowerCase()
     .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
@@ -186,26 +183,27 @@ function rating(value: string): "false" | "true" | "misleading" | "unknown" {
       "missing context",
       "partially true",
       "partly true",
-    ].some((x) => r.includes(x))
+    ].some((valueToMatch) => normalized.includes(valueToMatch))
   ) {
     return "misleading";
   }
 
   if (
-    r === "false" ||
-    r.includes("false") ||
-    r.includes("baseless") ||
-    r.includes("incorrect") ||
-    r.includes("wrong")
+    normalized === "false" ||
+    normalized.includes("false") ||
+    normalized.includes("baseless") ||
+    normalized.includes("incorrect") ||
+    normalized.includes("wrong") ||
+    normalized.includes("no evidence")
   ) {
     return "false";
   }
 
   if (
-    r === "true" ||
-    r.includes("true") ||
-    r.includes("correct") ||
-    r.includes("accurate")
+    normalized === "true" ||
+    normalized.includes("true") ||
+    normalized.includes("correct") ||
+    normalized.includes("accurate")
   ) {
     return "true";
   }
@@ -237,16 +235,68 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function calculateFactCheckConfidence(
+  totalRated: number,
+  agreement: number,
+  averageRelevance: number,
+  strongestCount: number
+): number {
+  if (!totalRated) return 0;
+
+  const coverage = Math.min(totalRated / 3, 1);
+  const consensus = Math.max(0, Math.min(agreement, 1));
+  const relevanceScore = Math.max(0, Math.min(averageRelevance / 100, 1));
+  const sourceStrength = Math.min(strongestCount / 3, 1);
+
+  return clampPercent(
+    40 + coverage * 20 + consensus * 25 + relevanceScore * 10 + sourceStrength * 5
+  );
+}
+
+async function inferRatingFromPage(url: string): Promise<RatingType> {
+  try {
+    const response = await axios.get(url, {
+      timeout: 7000,
+      headers: { "User-Agent": "ContextLens-AI/1.0" },
+    });
+    const text = stripHtml(String(response.data || ""));
+
+    const falsePatterns = [
+      /\bFACT\s*:\s*[^.]{0,260}\b(?:no cure|cannot cure|does not cure|doesn't cure|false|not true|not supported|no scientific evidence)\b/i,
+      /\b(?:the claim|this claim|claim)\b[^.]{0,120}\b(?:is|was)\s+(?:false|misleading|incorrect|wrong)\b/i,
+      /\b(?:hence|therefore|thus)\b[^.]{0,80}\b(?:false|misleading|incorrect|wrong)\b/i,
+    ];
+    if (falsePatterns.some((pattern) => pattern.test(text))) return "false";
+
+    const misleadingPatterns = [
+      /\b(?:claim|claims)\b[^.]{0,120}\b(?:misleading|partly true|partially true|missing context|out of context)\b/i,
+    ];
+    if (misleadingPatterns.some((pattern) => pattern.test(text))) return "misleading";
+
+    const truePatterns = [
+      /\bFACT\s*:\s*[^.]{0,180}\b(?:true|correct|accurate)\b/i,
+      /\b(?:the claim|this claim|claim)\b[^.]{0,120}\b(?:is|was)\s+(?:true|correct|accurate)\b/i,
+    ];
+    if (truePatterns.some((pattern) => pattern.test(text))) return "true";
+  } catch {
+    return "unknown";
+  }
+
+  return "unknown";
+}
+
 async function getOfficialEvidence(claim: string): Promise<{
   sources: AuthoritySource[];
   verdict: "VERIFIED" | "FALSE" | null;
   confidence: number;
   explanation: string;
 }> {
-  const matchingPages = OFFICIAL_SOURCE_PAGES.filter((page) =>
-    page.relevanceFor.test(claim)
-  );
-
+  const matchingPages = OFFICIAL_SOURCE_PAGES.filter((page) => page.relevanceFor.test(claim));
   if (!matchingPages.length) {
     return { sources: [], verdict: null, confidence: 0, explanation: "" };
   }
@@ -257,10 +307,9 @@ async function getOfficialEvidence(claim: string): Promise<{
         timeout: 7000,
         headers: { "User-Agent": "ContextLens-AI/1.0" },
       });
-      const text = stripHtml(String(response.data || ""));
       return {
         ...page,
-        score: relevance(claim, text, page.title),
+        score: relevance(claim, stripHtml(String(response.data || "")), page.title),
       };
     })
   );
@@ -281,37 +330,26 @@ async function getOfficialEvidence(claim: string): Promise<{
   }
 
   const negativeClaim = hasNegation(claim);
-
-  if (negativeClaim) {
-    return {
-      sources,
-      verdict: "FALSE",
-      confidence: Math.min(95, Math.max(85, sources[0].relevance)),
-      explanation:
-        "A relevant authoritative government source supports the opposite proposition, so the submitted claim is contradicted by current official information.",
-    };
-  }
+  const sourceConfidence = clampPercent(80 + Math.min(sources.length, 2) * 5 + sources[0].relevance * 0.1);
 
   return {
     sources,
-    verdict: "VERIFIED",
-    confidence: Math.min(95, Math.max(85, sources[0].relevance)),
-    explanation:
-      "A relevant authoritative government source supports this claim. ContextLens AI found matching information from an official source.",
+    verdict: negativeClaim ? "FALSE" : "VERIFIED",
+    confidence: Math.min(95, sourceConfidence),
+    explanation: negativeClaim
+      ? "A relevant authoritative government source supports the opposite proposition, so the submitted claim is contradicted by current official information."
+      : "A relevant authoritative government source supports this claim. ContextLens AI found matching information from an official source.",
   };
 }
 
 function buildFactCheckQueries(claim: string): string[] {
   const normalized = claim.replace(/\s+/g, " ").trim();
-  const compact = words(claim).slice(0, 12).join(" ");
+  const compact = words(claim).slice(0, 14).join(" ");
   const queries = [normalized, compact];
 
   if (/\blemon\b/i.test(claim) && /\bcancer\b/i.test(claim)) {
     queries.push("lemon water cancer cure");
-  }
-
-  if (/\bcure(?:s|d)?\b/i.test(claim) && /\bcancer\b/i.test(claim)) {
-    queries.push("lemon water cancer treatment cure");
+    queries.push("lemons cure cancer fact check");
   }
 
   return Array.from(new Set(queries.filter(Boolean))).slice(0, 4);
@@ -325,85 +363,78 @@ export async function POST(request: Request) {
     const imageUploaded = form.get("imageUploaded")?.toString() === "true";
 
     if (!claim) {
-      return NextResponse.json(
-        { error: "Please provide a claim to analyze." },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Please provide a claim to analyze." }, { status: 400 });
     }
 
-    if (!process.env.NEWS_API_KEY || !process.env.GOOGLE_FACT_CHECK_API_KEY) {
-      return NextResponse.json(
-        { error: "Analysis services are not configured correctly." },
-        { status: 500 }
-      );
-    }
+    const factCheckApiKey = process.env.GOOGLE_FACT_CHECK_API_KEY;
+    const newsApiKey = process.env.NEWS_API_KEY;
+    const factCheckQueries = factCheckApiKey ? buildFactCheckQueries(claim) : [];
 
-    const factCheckQueries = buildFactCheckQueries(claim);
+    const newsRequest = newsApiKey
+      ? axios.get("https://newsapi.org/v2/everything", {
+          params: {
+            q: claim,
+            language: "en",
+            sortBy: "relevancy",
+            pageSize: 10,
+            apiKey: newsApiKey,
+          },
+          timeout: 10000,
+        }).catch(() => ({ data: { articles: [] } }))
+      : Promise.resolve({ data: { articles: [] } });
 
-    const [newsResult, authorityNewsResult, officialResult, ...factCheckResults] =
-      await Promise.all([
-        axios
-          .get("https://newsapi.org/v2/everything", {
-            params: {
-              q: claim,
-              language: "en",
-              sortBy: "relevancy",
-              pageSize: 8,
-              apiKey: process.env.NEWS_API_KEY,
-            },
-            timeout: 10000,
-          })
-          .catch(() => ({ data: { articles: [] } })),
-        axios
-          .get("https://newsapi.org/v2/everything", {
-            params: {
-              q: claim,
-              language: "en",
-              sortBy: "relevancy",
-              pageSize: 10,
-              domains: AUTHORITATIVE_DOMAINS.join(","),
-              apiKey: process.env.NEWS_API_KEY,
-            },
-            timeout: 10000,
-          })
-          .catch(() => ({ data: { articles: [] } })),
-        getOfficialEvidence(claim),
-        ...factCheckQueries.map((query) =>
-          axios
-            .get("https://factchecktools.googleapis.com/v1alpha1/claims:search", {
-              params: {
-                query,
-                languageCode: "en",
-                pageSize: 10,
-                key: process.env.GOOGLE_FACT_CHECK_API_KEY,
-              },
-              timeout: 10000,
-            })
-            .catch(() => ({ data: { claims: [] } }))
-        ),
-      ]);
+    const authorityNewsRequest = newsApiKey
+      ? axios.get("https://newsapi.org/v2/everything", {
+          params: {
+            q: claim,
+            language: "en",
+            sortBy: "relevancy",
+            pageSize: 10,
+            domains: AUTHORITATIVE_DOMAINS.join(","),
+            apiKey: newsApiKey,
+          },
+          timeout: 10000,
+        }).catch(() => ({ data: { articles: [] } }))
+      : Promise.resolve({ data: { articles: [] } });
 
-    const news = Array.isArray(newsResult.data?.articles)
-      ? newsResult.data.articles
-      : [];
+    const factCheckRequests = factCheckQueries.map((query) =>
+      axios.get("https://factchecktools.googleapis.com/v1alpha1/claims:search", {
+        params: {
+          query,
+          languageCode: "en",
+          pageSize: 10,
+          key: factCheckApiKey,
+        },
+        timeout: 10000,
+      }).catch(() => ({ data: { claims: [] } }))
+    );
+
+    const [newsResult, authorityNewsResult, officialResult, ...factCheckResults] = await Promise.all([
+      newsRequest,
+      authorityNewsRequest,
+      getOfficialEvidence(claim),
+      ...factCheckRequests,
+    ]);
+
+    const news = Array.isArray(newsResult.data?.articles) ? newsResult.data.articles : [];
     const authorityNews = Array.isArray(authorityNewsResult.data?.articles)
       ? authorityNewsResult.data.articles
       : [];
 
-    const mapArticle = (a: {
+    const mapArticle = (article: {
       title?: string;
       description?: string | null;
       url?: string;
       source?: { name?: string };
     }): Article => ({
-      title: a.title || "Untitled article",
-      description: a.description || null,
-      url: a.url || "",
-      source: a.source?.name || "Unknown source",
+      title: article.title || "Untitled article",
+      description: article.description || null,
+      url: article.url || "",
+      source: article.source?.name || "Unknown source",
       relevance: relevance(
         claim,
-        `${a.title || ""} ${a.description || ""}`,
-        a.title || ""
+        `${article.title || ""} ${article.description || ""}`,
+        article.title || ""
       ),
     });
 
@@ -414,39 +445,35 @@ export async function POST(request: Request) {
 
     const authoritativeNews: Article[] = authorityNews
       .map(mapArticle)
-      .filter(
-        (article) => article.relevance >= 55 && isAuthoritativeUrl(article.url)
-      )
+      .filter((article) => article.relevance >= 55 && isAuthoritativeUrl(article.url))
       .sort((a, b) => b.relevance - a.relevance);
 
     const factChecks: FactCheck[] = [];
     const seenFactChecks = new Set<string>();
 
     for (const result of factCheckResults) {
-      const rawChecks = Array.isArray(result.data?.claims)
-        ? result.data.claims
-        : [];
+      const rawChecks = Array.isArray(result.data?.claims) ? result.data.claims : [];
 
-      for (const fc of rawChecks) {
-        const review = fc.claimReview?.[0];
+      for (const factCheck of rawChecks) {
+        const review = factCheck.claimReview?.[0];
         if (!review) continue;
 
-        const checkedClaim = String(fc.text || "").trim();
+        const checkedClaim = String(factCheck.text || "").trim();
         const title = String(review.title || "").trim();
         const url = String(review.url || "").trim();
         const score = factCheckRelevance(claim, checkedClaim, title);
-
         if (score < 65 || !url) continue;
 
         const key = `${url}|${checkedClaim}`;
         if (seenFactChecks.has(key)) continue;
         seenFactChecks.add(key);
 
+        const explicitRating = String(review.textualRating || "").trim();
         factChecks.push({
           claim: checkedClaim || claim,
           publisher: review.publisher?.name || "Unknown publisher",
           title: title || "No title available",
-          rating: review.textualRating || "No rating available",
+          rating: explicitRating,
           url,
           relevance: score,
         });
@@ -455,120 +482,104 @@ export async function POST(request: Request) {
 
     factChecks.sort((a, b) => b.relevance - a.relevance);
 
+    const unrated = factChecks.filter((factCheck) => !rating(factCheck.rating));
+    if (unrated.length) {
+      const inferredRatings = await Promise.all(
+        unrated.slice(0, 6).map((factCheck) => inferRatingFromPage(factCheck.url))
+      );
+      inferredRatings.forEach((inferred, index) => {
+        if (inferred !== "unknown") unrated[index].rating = inferred === "false" ? "False" : inferred === "true" ? "True" : "Misleading";
+      });
+    }
+
     let falseCount = 0;
     let trueCount = 0;
     let misleadingCount = 0;
 
-    for (const fc of factChecks) {
-      const type = rating(fc.rating);
-      if (type === "false") falseCount++;
-      if (type === "true") trueCount++;
-      if (type === "misleading") misleadingCount++;
+    for (const factCheck of factChecks) {
+      const type = rating(factCheck.rating);
+      if (type === "false") falseCount += 1;
+      if (type === "true") trueCount += 1;
+      if (type === "misleading") misleadingCount += 1;
     }
 
     const totalRated = falseCount + trueCount + misleadingCount;
     const strongest = Math.max(falseCount, trueCount, misleadingCount);
     const agreement = totalRated ? strongest / totalRated : 0;
-    const avgRelevance = factChecks.length
-      ? factChecks.reduce((sum, fc) => sum + fc.relevance, 0) /
-        factChecks.length
+    const averageRelevance = factChecks.length
+      ? factChecks.reduce((sum, factCheck) => sum + factCheck.relevance, 0) / factChecks.length
       : 0;
 
     let verdict = "UNVERIFIED";
     let confidence = 0;
-    let explanation =
-      "No sufficiently relevant published fact-check evidence was found. This does not mean the claim is true or false.";
+    let explanation = "No sufficiently relevant published fact-check evidence was found. This does not mean the claim is true or false.";
     let evidenceType = "none";
 
-    if (totalRated) {
+    if (totalRated > 0) {
       evidenceType = "fact-check";
-      confidence = Math.min(
-        95,
-        Math.max(
-          45,
-          Math.round(
-            40 +
-              Math.min(totalRated / 3, 1) * 20 +
-              agreement * 25 +
-              Math.min(avgRelevance / 100, 1) * 10 +
-              Math.min(strongest / 3, 1) * 5
-          )
-        )
-      );
+      confidence = calculateFactCheckConfidence(totalRated, agreement, averageRelevance, strongest);
 
-      if (falseCount && trueCount) {
-        verdict = "UNCERTAIN";
-        confidence = Math.max(35, confidence - 15);
-        explanation =
-          "Relevant fact-check sources disagree about this claim, so ContextLens AI cannot confidently classify it as true or false.";
+      if (falseCount > trueCount && falseCount >= misleadingCount) {
+        verdict = "FALSE";
+        explanation = "Relevant published fact-checks indicate that this claim is false.";
+      } else if (trueCount > falseCount && trueCount >= misleadingCount) {
+        verdict = "VERIFIED";
+        explanation = "Relevant published fact-checks support this claim. ContextLens AI found evidence from published fact-check sources that agree with the claim.";
       } else if (misleadingCount > falseCount && misleadingCount > trueCount) {
         verdict = "MISLEADING";
-        explanation =
-          "Relevant published fact-checks indicate that the claim is misleading, partially false, or missing important context.";
-      } else if (falseCount > trueCount) {
-        verdict = "FALSE";
-        explanation =
-          "Relevant published fact-checks indicate that this claim is false.";
-      } else if (trueCount > falseCount) {
-        verdict = "VERIFIED";
-        explanation =
-          "Relevant published fact-checks support this claim. ContextLens AI found evidence from published fact-check sources that agree with the claim.";
+        explanation = "Relevant published fact-checks indicate that the claim is misleading, partially false, or missing important context.";
       } else {
         verdict = "UNCERTAIN";
         confidence = Math.max(35, confidence - 10);
-        explanation =
-          "Relevant fact-check evidence was found, but it does not provide a sufficiently clear consensus.";
+        explanation = "Relevant fact-check evidence was found, but the published ratings do not provide a sufficiently clear consensus.";
       }
     } else if (officialResult.verdict) {
       evidenceType = "authoritative-source";
       verdict = officialResult.verdict;
-      confidence = officialResult.confidence;
+      confidence = clampPercent(officialResult.confidence);
       explanation = officialResult.explanation;
     } else if (authoritativeNews.length) {
       evidenceType = "authoritative-source";
       verdict = "VERIFIED";
-      confidence = Math.min(
-        90,
-        Math.max(
-          75,
-          Math.round(
-            authoritativeNews.reduce((sum, article) => sum + article.relevance, 0) /
-              authoritativeNews.length
-          )
-        )
+      confidence = clampPercent(
+        70 +
+          authoritativeNews.slice(0, 3).reduce((sum, article) => sum + article.relevance, 0) /
+            Math.max(1, authoritativeNews.slice(0, 3).length) *
+            0.2
       );
-      explanation =
-        "Relevant authoritative-source coverage was found. ContextLens AI treats this as stronger evidence than general news, but it is not a dedicated fact-check.";
+      explanation = "Relevant authoritative-source coverage was found. ContextLens AI treats this as stronger evidence than general news, but it is not a dedicated fact-check.";
+    } else if (factChecks.length) {
+      evidenceType = "fact-check-unrated";
+      confidence = clampPercent(20 + Math.min(averageRelevance, 100) * 0.2);
+      explanation = "Relevant published fact-check pages were found, but their machine-readable ratings could not be confirmed. The claim remains unverified rather than being treated as proven.";
     } else if (articles.length) {
-      verdict = "UNVERIFIED";
-      confidence = Math.min(
-        40,
-        Math.max(
-          20,
-          Math.round(
-            articles.reduce((sum, article) => sum + article.relevance, 0) /
-              articles.length
+      evidenceType = "news";
+      confidence = clampPercent(
+        Math.min(
+          40,
+          Math.max(
+            20,
+            articles.slice(0, 5).reduce((sum, article) => sum + article.relevance, 0) /
+              Math.max(1, articles.slice(0, 5).length) *
+              0.5
           )
         )
       );
-      explanation =
-        "Related news coverage was found, but no sufficiently relevant published fact-check or authoritative source was found. News coverage alone is not treated as proof that the claim is true.";
+      explanation = "Related news coverage was found, but no sufficiently relevant published fact-check or authoritative source was found. News coverage alone is not treated as proof that the claim is true.";
     }
 
     const mergedArticles = [
       ...authoritativeNews,
       ...articles.filter(
-        (article) =>
-          !authoritativeNews.some((authoritative) => authoritative.url === article.url)
+        (article) => !authoritativeNews.some((authoritative) => authoritative.url === article.url)
       ),
     ].slice(0, 8);
 
     return NextResponse.json({
       success: true,
       verdict,
-      confidence,
-      confidenceLabel:
-        "Evidence confidence — reflects the strength and agreement of retrieved evidence, not the mathematical probability that the claim is true.",
+      confidence: clampPercent(confidence),
+      confidenceLabel: "Evidence confidence — reflects the strength and agreement of retrieved evidence, not the mathematical probability that the claim is true.",
       explanation,
       evidenceType,
       imageContext: imageUploaded
@@ -587,26 +598,19 @@ export async function POST(request: Request) {
       totalRatedFactChecks: totalRated,
       evidenceAgreement: agreement,
       factChecksFound: factChecks.length,
-      factCheckEvidence: factChecks.map(
-        ({ claim: checkedClaim, publisher, title, rating: checkRating, url, relevance: checkRelevance }) => ({
-          claim: checkedClaim,
-          publisher,
-          title,
-          rating: checkRating,
-          url,
-          relevance: checkRelevance,
-        })
-      ),
+      factCheckEvidence: factChecks.map((factCheck) => ({
+        claim: factCheck.claim,
+        publisher: factCheck.publisher,
+        title: factCheck.title,
+        rating: factCheck.rating || "Not machine-rated",
+        url: factCheck.url,
+        relevance: factCheck.relevance,
+      })),
     });
   } catch (error) {
     console.error("Analysis error:", error);
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unable to analyze the claim.",
-      },
+      { error: error instanceof Error ? error.message : "Unable to analyze the claim." },
       { status: 500 }
     );
   }
