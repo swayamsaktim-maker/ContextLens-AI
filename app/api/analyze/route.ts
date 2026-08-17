@@ -110,7 +110,7 @@ export async function POST(request: Request) {
       } else if (falseCount > trueCount) {
         verdict = "FALSE"; explanation = "Relevant published fact-checks indicate that this claim is false.";
       } else if (trueCount > falseCount) {
-        verdict = "SUPPORTED"; explanation = "Relevant published fact-checks support the claim. ContextLens AI found evidence from published fact-check sources that agree with the claim.";
+        verdict = "VERIFIED"; explanation = "Relevant published fact-checks support this claim. ContextLens AI found evidence from published fact-check sources that agree with the claim.";
       } else {
         verdict = "UNCERTAIN"; confidence = Math.max(35, confidence - 10);
         explanation = "Relevant fact-check evidence was found, but it does not provide a sufficiently clear consensus.";
