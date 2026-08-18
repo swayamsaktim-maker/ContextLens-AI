@@ -441,14 +441,17 @@ export async function POST(request: Request) {
 
     const articles: Article[] = news
       .map(mapArticle)
-      .filter((article) => article.relevance >= 35 && article.url)
-      .sort((a, b) => b.relevance - a.relevance);
+      .filter((article: Article) => article.relevance >= 35 && article.url)
+      .sort((a: Article, b: Article) => b.relevance - a.relevance);
 
     const authoritativeNews: Article[] = authorityNews
       .map(mapArticle)
-      .filter((article) => article.relevance >= 55 && isAuthoritativeUrl(article.url))
-      .sort((a, b) => b.relevance - a.relevance);
-
+      .filter(
+        (article: Article) =>
+          article.relevance >= 55 && isAuthoritativeUrl(article.url)
+      )
+      .sort((a: Article, b: Article) => b.relevance - a.relevance);
+      
     const factChecks: FactCheck[] = [];
     const seenFactChecks = new Set<string>();
 
