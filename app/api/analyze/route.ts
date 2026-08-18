@@ -27,51 +27,66 @@ type AuthoritySource = {
 
 type RatingType = "false" | "true" | "misleading" | "unknown";
 
+type OfficialRule = {
+  names: RegExp;
+  expectedRole: RegExp;
+  expectedCountry: RegExp;
+  title: string;
+  source: string;
+  url: string;
+  evidencePattern: RegExp;
+};
+
 const STOP = new Set(
   "this that these those there their about with from have will would could should been being into than then they them what when where which while whose your ours ourselves the and for are was were has had can its our you but who how why is am be to of in on as at by an or a confirmed relevant published related source sources evidence claim claims"
     .split(" ")
 );
 
 const NEGATIONS = new Set([
-  "not",
-  "never",
-  "isnt",
-  "isn't",
-  "arent",
-  "aren't",
-  "wasnt",
-  "wasn't",
-  "wont",
-  "won't",
-  "cannot",
-  "can't",
-  "doesnt",
-  "doesn't",
+  "not", "never", "isnt", "isn't", "arent", "aren't", "wasnt", "wasn't",
+  "wont", "won't", "cannot", "can't", "doesnt", "doesn't", "no",
 ]);
 
 const AUTHORITATIVE_DOMAINS = [
   "pmindia.gov.in",
   "india.gov.in",
-  "pib.gov.in",
+  "presidentofindia.gov.in",
   "presidentofindia.nic.in",
+  "pib.gov.in",
   "eci.gov.in",
+  "whitehouse.gov",
   "who.int",
   "un.org",
   "nasa.gov",
 ];
 
-const OFFICIAL_SOURCE_PAGES = [
+const OFFICIAL_RULES: OfficialRule[] = [
   {
+    names: /\b(narendra\s+modi|modi)\b/i,
+    expectedRole: /\b(prime\s+minister|pm)\b/i,
+    expectedCountry: /\b(india|indian)\b/i,
     title: "Prime Minister of India — PM India",
     source: "Prime Minister's Office",
     url: "https://www.pmindia.gov.in/en/pms-profile/",
-    relevanceFor: /\b(narendra\s+modi|modi)\b.*\b(prime minister|pm)\b.*\bindia\b/i,
+    evidencePattern: /\b(narendra\s+modi|shri\s+narendra\s+modi)\b[\s\S]{0,500}\bprime\s+minister\s+of\s+india\b/i,
   },
   {
-    title: "Who's Who — National Portal of India",
-    source: "Government of India",
-    url: "https://www.india.gov.in/directory/whos-who",
-    relevanceFor: /\b(narendra\s+modi|modi)\b.*\b(prime minister|pm)\b.*\bindia\b/i,
+    names: /\b(droupadi\s+murmu|murmu)\b/i,
+    expectedRole: /\bpresident\b/i,
+    expectedCountry: /\b(india|indian)\b/i,
+    title: "The President of India — President of India",
+    source: "President's Secretariat",
+    url: "https://www.presidentofindia.gov.in/profile-0",
+    evidencePattern: /\b(droupadi\s+murmu|sm?t\.?\s+droupadi\s+murmu)\b[\s\S]{0,500}\bpresident\s+of\s+india\b/i,
+  },
+  {
+    names: /\b(donald\s+j\.?\s+trump|donald\s+trump|trump)\b/i,
+    expectedRole: /\bpresident\b/i,
+    expectedCountry: /\b(united\s+states|u\.?s\.?a?\.?|america|american)\b/i,
+    title: "President Donald J. Trump — White House",
+    source: "The White House",
+    url: "https://www.whitehouse.gov/administration/donald-j-trump/",
+    evidencePattern: /\bdonald\s+j\.?\s+trump\b[\s\S]{0,500}\bpresident\s+of\s+the\s+united\s+states\b/i,
   },
 ];
 
@@ -95,6 +110,11 @@ function hasNegation(text: string): boolean {
   return normalized.split(/\s+/).some((word) => NEGATIONS.has(word));
 }
 
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
 function relevance(claim: string, text: string, title = ""): number {
   const claimWords = words(claim);
   const evidenceWords = new Set(words(text));
@@ -106,10 +126,7 @@ function relevance(claim: string, text: string, title = ""): number {
 
   return Math.min(
     100,
-    Math.round(
-      (bodyMatches / claimWords.length) * 70 +
-        (titleMatches / claimWords.length) * 30
-    )
+    Math.round((bodyMatches / claimWords.length) * 70 + (titleMatches / claimWords.length) * 30)
   );
 }
 
@@ -122,92 +139,43 @@ function factCheckRelevance(claim: string, checkedClaim: string, title: string):
   const overlap = [...claimWords].filter((word) => checkedWords.has(word)).length;
   const claimCoverage = overlap / claimWords.size;
   const evidenceCoverage = overlap / checkedWords.size;
-  const f1 =
-    claimCoverage + evidenceCoverage > 0
-      ? (2 * claimCoverage * evidenceCoverage) / (claimCoverage + evidenceCoverage)
-      : 0;
-  const titleCoverage =
-    [...claimWords].filter((word) => titleWords.has(word)).length / claimWords.size;
+  const f1 = claimCoverage + evidenceCoverage > 0
+    ? (2 * claimCoverage * evidenceCoverage) / (claimCoverage + evidenceCoverage)
+    : 0;
+  const titleCoverage = [...claimWords].filter((word) => titleWords.has(word)).length / claimWords.size;
 
   let score = f1 * 70 + titleCoverage * 30;
-  const distinctiveExtras = [...checkedWords].filter((word) => !claimWords.has(word));
-  const extraRatio = distinctiveExtras.length / checkedWords.size;
-  if (extraRatio > 0.3 && claimCoverage < 1) score -= 15;
+  const extras = [...checkedWords].filter((word) => !claimWords.has(word));
+  if (extras.length / checkedWords.size > 0.3 && claimCoverage < 1) score -= 15;
 
   const scopeModifiers = new Set([
-    "first",
-    "second",
-    "only",
-    "former",
-    "future",
-    "candidate",
-    "minister",
-    "president",
-    "chief",
-    "obc",
-    "sc",
-    "st",
-    "caste",
-    "election",
-    "elected",
-    "resigned",
-    "arrested",
-    "convicted",
-    "born",
-    "died",
-    "wife",
-    "son",
-    "daughter",
+    "first", "second", "only", "former", "future", "candidate", "minister",
+    "president", "chief", "obc", "sc", "st", "caste", "election", "elected",
+    "resigned", "arrested", "convicted", "born", "died", "wife", "son", "daughter",
   ]);
+  if (extras.some((word) => scopeModifiers.has(word))) score -= 25;
 
-  if (distinctiveExtras.some((word) => scopeModifiers.has(word))) score -= 25;
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
 function rating(value: string): RatingType {
-  const normalized = value
-    .toLowerCase()
-    .replace(/[^\w\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
+  const normalized = value.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!normalized) return "unknown";
 
-  if (
-    [
-      "mostly false",
-      "partly false",
-      "half true",
-      "half false",
-      "misleading",
-      "mixed",
-      "out of context",
-      "missing context",
-      "partially true",
-      "partly true",
-    ].some((valueToMatch) => normalized.includes(valueToMatch))
-  ) {
-    return "misleading";
-  }
+  if ([
+    "mostly false", "partly false", "half true", "half false", "misleading",
+    "mixed", "out of context", "missing context", "partially true", "partly true",
+  ].some((item) => normalized.includes(item))) return "misleading";
 
   if (
-    normalized === "false" ||
-    normalized.includes("false") ||
-    normalized.includes("baseless") ||
-    normalized.includes("incorrect") ||
-    normalized.includes("wrong")
-  ) {
-    return "false";
-  }
+    normalized === "false" || normalized.includes("false") || normalized.includes("baseless") ||
+    normalized.includes("incorrect") || normalized.includes("wrong") || normalized.includes("fake")
+  ) return "false";
 
   if (
-    normalized === "true" ||
-    normalized.includes("true") ||
-    normalized.includes("correct") ||
+    normalized === "true" || normalized.includes("true") || normalized.includes("correct") ||
     normalized.includes("accurate")
-  ) {
-    return "true";
-  }
+  ) return "true";
 
   return "unknown";
 }
@@ -215,9 +183,7 @@ function rating(value: string): RatingType {
 function isAuthoritativeUrl(url: string): boolean {
   try {
     const hostname = new URL(url).hostname.toLowerCase();
-    return AUTHORITATIVE_DOMAINS.some(
-      (domain) => hostname === domain || hostname.endsWith(`.${domain}`)
-    );
+    return AUTHORITATIVE_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
   } catch {
     return false;
   }
@@ -236,27 +202,12 @@ function stripHtml(html: string): string {
     .trim();
 }
 
-function clampPercent(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.min(100, Math.max(0, Math.round(value)));
-}
-
-function calculateFactCheckConfidence(
-  totalRated: number,
-  agreement: number,
-  averageRelevance: number,
-  strongestCount: number
-): number {
+function calculateFactCheckConfidence(totalRated: number, agreement: number, averageRelevance: number): number {
   if (!totalRated) return 0;
-
   const coverage = Math.min(totalRated / 3, 1);
   const consensus = Math.max(0, Math.min(agreement, 1));
   const relevanceScore = Math.max(0, Math.min(averageRelevance / 100, 1));
-  const sourceStrength = Math.min(strongestCount / 3, 1);
-
-  return clampPercent(
-    40 + coverage * 20 + consensus * 25 + relevanceScore * 10 + sourceStrength * 5
-  );
+  return clampPercent(45 + coverage * 20 + consensus * 25 + relevanceScore * 10);
 }
 
 async function inferRatingFromPage(url: string): Promise<RatingType> {
@@ -267,28 +218,26 @@ async function inferRatingFromPage(url: string): Promise<RatingType> {
     });
     const text = stripHtml(String(response.data || ""));
 
-    const falsePatterns = [
-      /\bFACT\s*:\s*[^.]{0,260}\b(?:no cure|cannot cure|does not cure|doesn't cure|false|not true|not supported|no scientific evidence)\b/i,
-      /\b(?:the claim|this claim|claim)\b[^.]{0,120}\b(?:is|was)\s+(?:false|misleading|incorrect|wrong)\b/i,
-      /\b(?:hence|therefore|thus)\b[^.]{0,80}\b(?:false|misleading|incorrect|wrong)\b/i,
-    ];
-    if (falsePatterns.some((pattern) => pattern.test(text))) return "false";
-
-    const misleadingPatterns = [
-      /\b(?:claim|claims)\b[^.]{0,120}\b(?:misleading|partly true|partially true|missing context|out of context)\b/i,
-    ];
-    if (misleadingPatterns.some((pattern) => pattern.test(text))) return "misleading";
-
-    const truePatterns = [
-      /\bFACT\s*:\s*[^.]{0,180}\b(?:true|correct|accurate)\b/i,
-      /\b(?:the claim|this claim|claim)\b[^.]{0,120}\b(?:is|was)\s+(?:true|correct|accurate)\b/i,
-    ];
-    if (truePatterns.some((pattern) => pattern.test(text))) return "true";
+    if (/\b(?:false|fake|incorrect|wrong|not true|does not cure|cannot cure|no scientific evidence|no evidence that)\b/i.test(text)) return "false";
+    if (/\b(?:misleading|partly true|partially true|missing context|out of context)\b/i.test(text)) return "misleading";
+    if (/\b(?:true|correct|accurate|verified)\b/i.test(text)) return "true";
   } catch {
     return "unknown";
   }
-
   return "unknown";
+}
+
+function buildFactCheckQueries(claim: string): string[] {
+  const normalized = claim.replace(/\s+/g, " ").trim();
+  const compact = words(claim).slice(0, 16).join(" ");
+  const queries = [normalized, compact];
+
+  if (/\blemon\b/i.test(claim) && /\bcancer\b/i.test(claim)) {
+    queries.push("lemon water cancer cure fact check");
+    queries.push("lemons cure cancer fact check");
+  }
+
+  return Array.from(new Set(queries.filter(Boolean))).slice(0, 4);
 }
 
 async function getOfficialEvidence(claim: string): Promise<{
@@ -297,63 +246,71 @@ async function getOfficialEvidence(claim: string): Promise<{
   confidence: number;
   explanation: string;
 }> {
-  const matchingPages = OFFICIAL_SOURCE_PAGES.filter((page) => page.relevanceFor.test(claim));
-  if (!matchingPages.length) {
-    return { sources: [], verdict: null, confidence: 0, explanation: "" };
-  }
+  const matchingRules = OFFICIAL_RULES.filter((rule) => rule.names.test(claim));
+  if (!matchingRules.length) return { sources: [], verdict: null, confidence: 0, explanation: "" };
 
   const results = await Promise.allSettled(
-    matchingPages.map(async (page) => {
-      const response = await axios.get(page.url, {
+    matchingRules.map(async (rule) => {
+      const response = await axios.get(rule.url, {
         timeout: 7000,
         headers: { "User-Agent": "ContextLens-AI/1.0" },
       });
-      return {
-        ...page,
-        score: relevance(claim, stripHtml(String(response.data || "")), page.title),
-      };
+      const pageText = stripHtml(String(response.data || ""));
+      return { rule, pageText, evidenceMatch: rule.evidencePattern.test(pageText) };
     })
   );
 
   const sources = results
-    .filter((result): result is PromiseFulfilledResult<(typeof matchingPages)[number] & { score: number }> => result.status === "fulfilled")
-    .map((result) => ({
-      title: result.value.title,
-      source: result.value.source,
-      url: result.value.url,
-      relevance: result.value.score,
-    }))
-    .filter((source) => source.relevance >= 60)
-    .sort((a, b) => b.relevance - a.relevance);
+    .filter((item): item is PromiseFulfilledResult<{ rule: OfficialRule; pageText: string; evidenceMatch: boolean }> => item.status === "fulfilled" && item.value.evidenceMatch)
+    .map((item) => ({
+      title: item.value.rule.title,
+      source: item.value.rule.source,
+      url: item.value.rule.url,
+      relevance: 95,
+    }));
 
-  if (!sources.length) {
-    return { sources: [], verdict: null, confidence: 0, explanation: "" };
+  if (!sources.length) return { sources: [], verdict: null, confidence: 0, explanation: "" };
+
+  const negative = hasNegation(claim);
+  const roleClaim = matchingRules.some((rule) => rule.expectedRole.test(claim));
+  const countryClaim = matchingRules.some((rule) => rule.expectedCountry.test(claim));
+
+  // A role/country statement is only treated as authoritative when the
+  // claim names the person and the relevant office/country. This prevents
+  // an unrelated official page from becoming proof for an arbitrary claim.
+  if (roleClaim && countryClaim) {
+    const matchedRule = matchingRules.find((rule) => rule.expectedRole.test(claim) && rule.expectedCountry.test(claim));
+    if (matchedRule) {
+      const expectedCountryIsPresent = matchedRule.expectedCountry.test(claim);
+      const expectedRoleIsPresent = matchedRule.expectedRole.test(claim);
+      if (expectedCountryIsPresent && expectedRoleIsPresent) {
+        return {
+          sources,
+          verdict: negative ? "FALSE" : "VERIFIED",
+          confidence: 94,
+          explanation: negative
+            ? "Current authoritative government information supports the opposite proposition, so the submitted claim is contradicted by an official source."
+            : "Current authoritative government information directly supports this claim.",
+        };
+      }
+    }
   }
 
-  const negativeClaim = hasNegation(claim);
-  const sourceConfidence = clampPercent(80 + Math.min(sources.length, 2) * 5 + sources[0].relevance * 0.1);
+  // Catch obvious role mismatches such as “Trump is the president of India”.
+  const subjectRule = matchingRules[0];
+  const mentionsWrongCountry = /\b(india|indian)\b/i.test(claim) && !subjectRule.expectedCountry.test(claim);
+  const mentionsWrongRole = /\b(prime\s+minister|president|chancellor|king|queen|chief\s+minister)\b/i.test(claim) && !subjectRule.expectedRole.test(claim);
 
-  return {
-    sources,
-    verdict: negativeClaim ? "FALSE" : "VERIFIED",
-    confidence: Math.min(95, sourceConfidence),
-    explanation: negativeClaim
-      ? "A relevant authoritative government source supports the opposite proposition, so the submitted claim is contradicted by current official information."
-      : "A relevant authoritative government source supports this claim. ContextLens AI found matching information from an official source.",
-  };
-}
-
-function buildFactCheckQueries(claim: string): string[] {
-  const normalized = claim.replace(/\s+/g, " ").trim();
-  const compact = words(claim).slice(0, 14).join(" ");
-  const queries = [normalized, compact];
-
-  if (/\blemon\b/i.test(claim) && /\bcancer\b/i.test(claim)) {
-    queries.push("lemon water cancer cure");
-    queries.push("lemons cure cancer fact check");
+  if (mentionsWrongCountry || mentionsWrongRole || negative) {
+    return {
+      sources,
+      verdict: "FALSE",
+      confidence: 94,
+      explanation: "The submitted claim conflicts with current authoritative information from an official government source.",
+    };
   }
 
-  return Array.from(new Set(queries.filter(Boolean))).slice(0, 4);
+  return { sources, verdict: null, confidence: 0, explanation: "" };
 }
 
 export async function POST(request: Request) {
@@ -373,13 +330,7 @@ export async function POST(request: Request) {
 
     const newsRequest = newsApiKey
       ? axios.get("https://newsapi.org/v2/everything", {
-          params: {
-            q: claim,
-            language: "en",
-            sortBy: "relevancy",
-            pageSize: 10,
-            apiKey: newsApiKey,
-          },
+          params: { q: claim, language: "en", sortBy: "relevancy", pageSize: 10, apiKey: newsApiKey },
           timeout: 10000,
         }).catch(() => ({ data: { articles: [] } }))
       : Promise.resolve({ data: { articles: [] } });
@@ -400,12 +351,7 @@ export async function POST(request: Request) {
 
     const factCheckRequests = factCheckQueries.map((query) =>
       axios.get("https://factchecktools.googleapis.com/v1alpha1/claims:search", {
-        params: {
-          query,
-          languageCode: "en",
-          pageSize: 10,
-          key: factCheckApiKey,
-        },
+        params: { query, languageCode: "en", pageSize: 10, key: factCheckApiKey },
         timeout: 10000,
       }).catch(() => ({ data: { claims: [] } }))
     );
@@ -418,9 +364,7 @@ export async function POST(request: Request) {
     ]);
 
     const news = Array.isArray(newsResult.data?.articles) ? newsResult.data.articles : [];
-    const authorityNews = Array.isArray(authorityNewsResult.data?.articles)
-      ? authorityNewsResult.data.articles
-      : [];
+    const authorityNews = Array.isArray(authorityNewsResult.data?.articles) ? authorityNewsResult.data.articles : [];
 
     const mapArticle = (article: {
       title?: string;
@@ -432,32 +376,24 @@ export async function POST(request: Request) {
       description: article.description || null,
       url: article.url || "",
       source: article.source?.name || "Unknown source",
-      relevance: relevance(
-        claim,
-        `${article.title || ""} ${article.description || ""}`,
-        article.title || ""
-      ),
+      relevance: relevance(claim, `${article.title || ""} ${article.description || ""}`, article.title || ""),
     });
 
     const articles: Article[] = news
       .map(mapArticle)
-      .filter((article: Article) => article.relevance >= 35 && article.url)
+      .filter((article: Article) => article.relevance >= 35 && Boolean(article.url))
       .sort((a: Article, b: Article) => b.relevance - a.relevance);
 
     const authoritativeNews: Article[] = authorityNews
       .map(mapArticle)
-      .filter(
-        (article: Article) =>
-          article.relevance >= 55 && isAuthoritativeUrl(article.url)
-      )
+      .filter((article: Article) => article.relevance >= 55 && isAuthoritativeUrl(article.url))
       .sort((a: Article, b: Article) => b.relevance - a.relevance);
-      
+
     const factChecks: FactCheck[] = [];
     const seenFactChecks = new Set<string>();
 
     for (const result of factCheckResults) {
       const rawChecks = Array.isArray(result.data?.claims) ? result.data.claims : [];
-
       for (const factCheck of rawChecks) {
         const review = factCheck.claimReview?.[0];
         if (!review) continue;
@@ -487,13 +423,11 @@ export async function POST(request: Request) {
 
     const unrated = factChecks.filter((factCheck) => rating(factCheck.rating) === "unknown");
     if (unrated.length) {
-      const inferredRatings = await Promise.all(
-        unrated.slice(0, 6).map((factCheck) => inferRatingFromPage(factCheck.url))
-      );
-      inferredRatings.forEach((inferred, index) => {
-        if (inferred === "false") unrated[index].rating = "False";
-        if (inferred === "true") unrated[index].rating = "True";
-        if (inferred === "misleading") unrated[index].rating = "Misleading";
+      const inferred = await Promise.all(unrated.slice(0, 6).map((factCheck) => inferRatingFromPage(factCheck.url)));
+      inferred.forEach((value, index) => {
+        if (value === "false") unrated[index].rating = "False";
+        if (value === "true") unrated[index].rating = "True";
+        if (value === "misleading") unrated[index].rating = "Misleading";
       });
     }
 
@@ -516,26 +450,26 @@ export async function POST(request: Request) {
       : 0;
 
     let verdict = "UNVERIFIED";
-    let confidence = 0;
-    let explanation = "No sufficiently relevant published fact-check evidence was found. This does not mean the claim is true or false.";
+    let confidence = 15;
+    let explanation = "No sufficiently relevant published fact-check or authoritative evidence was found. This does not mean the claim is true or false.";
     let evidenceType = "none";
 
     if (totalRated > 0) {
       evidenceType = "fact-check";
-      confidence = calculateFactCheckConfidence(totalRated, agreement, averageRelevance, strongest);
+      confidence = calculateFactCheckConfidence(totalRated, agreement, averageRelevance);
 
       if (falseCount > trueCount && falseCount >= misleadingCount) {
         verdict = "FALSE";
         explanation = "Relevant published fact-checks indicate that this claim is false.";
       } else if (trueCount > falseCount && trueCount >= misleadingCount) {
         verdict = "VERIFIED";
-        explanation = "Relevant published fact-checks support this claim. ContextLens AI found evidence from published fact-check sources that agree with the claim.";
+        explanation = "Relevant published fact-checks support this claim.";
       } else if (misleadingCount > falseCount && misleadingCount > trueCount) {
         verdict = "MISLEADING";
-        explanation = "Relevant published fact-checks indicate that the claim is misleading, partially false, or missing important context.";
+        explanation = "Relevant published fact-checks indicate that the claim is misleading or missing important context.";
       } else {
         verdict = "UNCERTAIN";
-        confidence = Math.max(35, confidence - 10);
+        confidence = Math.max(40, confidence - 10);
         explanation = "Relevant fact-check evidence was found, but the published ratings do not provide a sufficiently clear consensus.";
       }
     } else if (officialResult.verdict) {
@@ -544,29 +478,27 @@ export async function POST(request: Request) {
       confidence = clampPercent(officialResult.confidence);
       explanation = officialResult.explanation;
     } else if (authoritativeNews.length) {
-      evidenceType = "authoritative-source";
-      verdict = "VERIFIED";
+      evidenceType = "authoritative-news";
+      verdict = "UNVERIFIED";
       const topAuthority = authoritativeNews.slice(0, 3);
       const averageAuthorityRelevance = topAuthority.reduce((sum, article) => sum + article.relevance, 0) / Math.max(1, topAuthority.length);
-      confidence = clampPercent(70 + averageAuthorityRelevance * 0.2);
-      explanation = "Relevant authoritative-source coverage was found. ContextLens AI treats this as stronger evidence than general news, but it is not a dedicated fact-check.";
+      confidence = clampPercent(35 + averageAuthorityRelevance * 0.25);
+      explanation = "Relevant authoritative-source coverage was found, but it does not directly establish the claim as true or false.";
     } else if (factChecks.length) {
       evidenceType = "fact-check-unrated";
-      confidence = clampPercent(20 + Math.min(averageRelevance, 100) * 0.2);
-      explanation = "Relevant published fact-check pages were found, but their machine-readable ratings could not be confirmed. The claim remains unverified rather than being treated as proven.";
+      confidence = clampPercent(30 + averageRelevance * 0.35);
+      explanation = "Relevant published fact-check pages were found, but their ratings could not be confirmed automatically. The claim is not treated as proven.";
     } else if (articles.length) {
       evidenceType = "news";
       const topArticles = articles.slice(0, 5);
       const averageNewsRelevance = topArticles.reduce((sum, article) => sum + article.relevance, 0) / Math.max(1, topArticles.length);
-      confidence = clampPercent(Math.min(40, Math.max(20, averageNewsRelevance * 0.5)));
-      explanation = "Related news coverage was found, but no sufficiently relevant published fact-check or authoritative source was found. News coverage alone is not treated as proof that the claim is true.";
+      confidence = clampPercent(20 + averageNewsRelevance * 0.25);
+      explanation = "Related news coverage was found, but news coverage alone is not treated as proof that the claim is true or false.";
     }
 
     const mergedArticles = [
       ...authoritativeNews,
-      ...articles.filter(
-        (article) => !authoritativeNews.some((authoritative) => authoritative.url === article.url)
-      ),
+      ...articles.filter((article) => !authoritativeNews.some((authoritative) => authoritative.url === article.url)),
     ].slice(0, 8);
 
     return NextResponse.json({
