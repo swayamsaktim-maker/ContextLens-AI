@@ -33,6 +33,7 @@ type AnalysisData = {
   confidence: number;
   confidenceLabel: string;
   explanation: string;
+  counterEvidence?: string;
   evidenceType?: string;
   imageContext: string;
   extractedTextAvailable: boolean;
@@ -198,14 +199,7 @@ export default function Home() {
               <p className="text-sm font-medium text-zinc-500">Analyzed content</p>
               {image ? (
                 <div className="relative mt-3 overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50">
-                  <Image
-                    src={image}
-                    alt="Analyzed claim"
-                    width={1200}
-                    height={700}
-                    unoptimized
-                    className="max-h-80 w-full object-contain"
-                  />
+                  <Image src={image} alt="Analyzed claim" width={1200} height={700} unoptimized className="max-h-80 w-full object-contain" />
                 </div>
               ) : (
                 <div className="mt-3 rounded-2xl bg-zinc-50 p-5">
@@ -227,6 +221,16 @@ export default function Home() {
               <p className="text-sm font-semibold text-zinc-900">Why this result?</p>
               <p className="mt-2 text-sm leading-6 text-zinc-600">{analysisData.explanation}</p>
             </div>
+
+            {verdict === "FALSE" && analysisData.counterEvidence && (
+              <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 p-5">
+                <p className="text-sm font-semibold text-red-900">Why is it false?</p>
+                <p className="mt-2 text-sm leading-6 text-red-800">{analysisData.counterEvidence}</p>
+                <p className="mt-3 text-xs leading-5 text-red-700">
+                  This is the evidence that contradicts the submitted claim. Read the linked source below before sharing.
+                </p>
+              </div>
+            )}
 
             {image && (
               <div className="mt-5 rounded-2xl border border-zinc-200 p-5">
@@ -262,7 +266,6 @@ export default function Home() {
                   style={{ width: `${confidence}%` }}
                 />
               </div>
-
               <div className="mt-2 flex justify-between text-[11px] text-zinc-400">
                 <span>0</span>
                 <span>100</span>
@@ -276,23 +279,19 @@ export default function Home() {
                   Based on {analysisData.totalRatedFactChecks} rated fact-check{analysisData.totalRatedFactChecks === 1 ? "" : "s"} with {Math.round(analysisData.evidenceAgreement * 100)}% agreement.
                 </p>
               ) : analysisData.factChecksFound > 0 ? (
-                <p className="mt-2 text-sm leading-6 text-zinc-600">
-                  Relevant fact-check pages were found, but their machine-readable ratings could not be confirmed.
-                </p>
+                <p className="mt-2 text-sm leading-6 text-zinc-600">Relevant fact-check pages were found, but their machine-readable ratings could not be confirmed.</p>
               ) : analysisData.authoritativeSources?.length ? (
                 <p className="mt-2 text-sm leading-6 text-zinc-600">
-                  Supported by {analysisData.authoritativeSources.length} relevant authoritative source{analysisData.authoritativeSources.length === 1 ? "" : "s"}.
+                  Supported by {analysisData.authoritativeSources.length} relevant evidence source{analysisData.authoritativeSources.length === 1 ? "" : "s"}.
                 </p>
               ) : (
-                <p className="mt-2 text-sm leading-6 text-zinc-600">
-                  No published fact-check was found. Related sources are not treated as proof of truth.
-                </p>
+                <p className="mt-2 text-sm leading-6 text-zinc-600">No published fact-check was found. Related sources are not treated as proof of truth.</p>
               )}
             </div>
 
             {analysisData.authoritativeSources && analysisData.authoritativeSources.length > 0 && (
               <div className="mt-6">
-                <p className="text-sm font-semibold text-zinc-900">Authoritative sources</p>
+                <p className="text-sm font-semibold text-zinc-900">Evidence sources</p>
                 <div className="mt-3 space-y-3">
                   {analysisData.authoritativeSources.map((source, index) => (
                     <a
@@ -325,9 +324,7 @@ export default function Home() {
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-semibold text-zinc-900">{factCheck.publisher}</p>
-                        <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-600">
-                          {factCheck.rating || "Not machine-rated"}
-                        </span>
+                        <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-600">{factCheck.rating || "Not machine-rated"}</span>
                       </div>
                       <p className="mt-2 text-sm text-zinc-800">{factCheck.title}</p>
                       <p className="mt-2 text-xs leading-5 text-zinc-500">Checked claim: {factCheck.claim}</p>
@@ -380,9 +377,7 @@ export default function Home() {
       <div className="mx-auto w-full max-w-3xl">
         <p className="text-sm font-semibold tracking-[0.18em] text-zinc-500">CONTEXTLENS AI</p>
         <h1 className="mt-8 text-4xl font-semibold tracking-tight sm:text-5xl">Verify before you share.</h1>
-        <p className="mt-4 max-w-2xl text-base leading-7 text-zinc-600">
-          ContextLens AI checks claims against published fact-checks, authoritative sources, and real-time coverage.
-        </p>
+        <p className="mt-4 max-w-2xl text-base leading-7 text-zinc-600">ContextLens AI checks claims against published fact-checks, authoritative sources, knowledge-graph evidence, and real-time coverage.</p>
 
         <section className="mt-10 rounded-3xl border border-zinc-200 p-6 shadow-sm sm:p-8">
           <label htmlFor="claim" className="text-sm font-semibold text-zinc-900">Claim to check</label>
@@ -401,50 +396,28 @@ export default function Home() {
           <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
             <label className="cursor-pointer rounded-full border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50">
               Upload image
-              <input
-                type="file"
-                accept="image/*"
-                onChange={handleImageUpload}
-                className="hidden"
-              />
+              <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
             </label>
 
             {image && (
-              <button
-                type="button"
-                onClick={clearImage}
-                className="text-sm text-zinc-500 transition hover:text-zinc-900"
-              >
-                Remove image
-              </button>
+              <button type="button" onClick={clearImage} className="text-sm text-zinc-500 transition hover:text-zinc-900">Remove image</button>
             )}
           </div>
 
           {image && (
             <div className="relative mt-5 overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50">
-              <Image
-                src={image}
-                alt="Uploaded claim"
-                width={1200}
-                height={700}
-                unoptimized
-                className="max-h-96 w-full object-contain"
-              />
+              <Image src={image} alt="Uploaded claim" width={1200} height={700} unoptimized className="max-h-72 w-full object-contain" />
             </div>
           )}
 
           <button
             type="button"
             onClick={handleCheck}
-            disabled={checking || !claim.trim()}
-            className="mt-6 w-full rounded-2xl bg-zinc-900 px-5 py-4 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={checking}
+            className="mt-6 w-full rounded-2xl bg-zinc-900 px-5 py-3.5 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {checking ? "Analyzing evidence..." : "Check Claim"}
+            {checking ? "Analyzing evidence…" : "Check Claim"}
           </button>
-
-          {checking && (
-            <p className="mt-3 text-center text-xs text-zinc-400">Retrieving and comparing evidence. This can take a few seconds.</p>
-          )}
         </section>
       </div>
     </main>
