@@ -31,6 +31,9 @@ type OfficialRule = {
   names: RegExp;
   expectedRole: RegExp;
   expectedCountry: RegExp;
+  expectedPerson: string;
+  expectedRoleLabel: string;
+  expectedCountryLabel: string;
   title: string;
   source: string;
   url: string;
@@ -65,6 +68,9 @@ const OFFICIAL_RULES: OfficialRule[] = [
     names: /\b(narendra\s+modi|modi)\b/i,
     expectedRole: /\b(prime\s+minister|pm)\b/i,
     expectedCountry: /\b(india|indian)\b/i,
+    expectedPerson: "Narendra Modi",
+    expectedRoleLabel: "Prime Minister",
+    expectedCountryLabel: "India",
     title: "Prime Minister of India — PM India",
     source: "Prime Minister's Office",
     url: "https://www.pmindia.gov.in/en/pms-profile/",
@@ -74,6 +80,9 @@ const OFFICIAL_RULES: OfficialRule[] = [
     names: /\b(droupadi\s+murmu|murmu)\b/i,
     expectedRole: /\bpresident\b/i,
     expectedCountry: /\b(india|indian)\b/i,
+    expectedPerson: "Droupadi Murmu",
+    expectedRoleLabel: "President",
+    expectedCountryLabel: "India",
     title: "The President of India — President of India",
     source: "President's Secretariat",
     url: "https://www.presidentofindia.gov.in/profile-0",
@@ -83,6 +92,9 @@ const OFFICIAL_RULES: OfficialRule[] = [
     names: /\b(donald\s+j\.?\s+trump|donald\s+trump|trump)\b/i,
     expectedRole: /\bpresident\b/i,
     expectedCountry: /\b(united\s+states|u\.?s\.?a?\.?|america|american)\b/i,
+    expectedPerson: "Donald J. Trump",
+    expectedRoleLabel: "President",
+    expectedCountryLabel: "the United States",
     title: "President Donald J. Trump — White House",
     source: "The White House",
     url: "https://www.whitehouse.gov/administration/donald-j-trump/",
@@ -275,28 +287,23 @@ async function getOfficialEvidence(claim: string): Promise<{
   const roleClaim = matchingRules.some((rule) => rule.expectedRole.test(claim));
   const countryClaim = matchingRules.some((rule) => rule.expectedCountry.test(claim));
 
-  // A role/country statement is only treated as authoritative when the
-  // claim names the person and the relevant office/country. This prevents
-  // an unrelated official page from becoming proof for an arbitrary claim.
+  const buildCounterEvidence = (rule: OfficialRule): string =>
+    `Evidence from ${rule.source}: ${rule.expectedPerson} is the ${rule.expectedRoleLabel} of ${rule.expectedCountryLabel}.`;
+
   if (roleClaim && countryClaim) {
     const matchedRule = matchingRules.find((rule) => rule.expectedRole.test(claim) && rule.expectedCountry.test(claim));
     if (matchedRule) {
-      const expectedCountryIsPresent = matchedRule.expectedCountry.test(claim);
-      const expectedRoleIsPresent = matchedRule.expectedRole.test(claim);
-      if (expectedCountryIsPresent && expectedRoleIsPresent) {
-        return {
-          sources,
-          verdict: negative ? "FALSE" : "VERIFIED",
-          confidence: 94,
-          explanation: negative
-            ? "Current authoritative government information supports the opposite proposition, so the submitted claim is contradicted by an official source."
-            : "Current authoritative government information directly supports this claim.",
-        };
-      }
+      return {
+        sources,
+        verdict: negative ? "FALSE" : "VERIFIED",
+        confidence: 94,
+        explanation: negative
+          ? `The submitted claim is false because it is contradicted by current authoritative information. ${buildCounterEvidence(matchedRule)} This is the evidence supporting the opposite proposition.`
+          : `The submitted claim is supported by current authoritative information. ${buildCounterEvidence(matchedRule)}`,
+      };
     }
   }
 
-  // Catch obvious role mismatches such as “Trump is the president of India”.
   const subjectRule = matchingRules[0];
   const mentionsWrongCountry = /\b(india|indian)\b/i.test(claim) && !subjectRule.expectedCountry.test(claim);
   const mentionsWrongRole = /\b(prime\s+minister|president|chancellor|king|queen|chief\s+minister)\b/i.test(claim) && !subjectRule.expectedRole.test(claim);
@@ -306,7 +313,7 @@ async function getOfficialEvidence(claim: string): Promise<{
       sources,
       verdict: "FALSE",
       confidence: 94,
-      explanation: "The submitted claim conflicts with current authoritative information from an official government source.",
+      explanation: `The submitted claim is false because it conflicts with current authoritative information. ${buildCounterEvidence(subjectRule)} This official evidence directly contradicts the submitted claim.`,
     };
   }
 
@@ -460,7 +467,10 @@ export async function POST(request: Request) {
 
       if (falseCount > trueCount && falseCount >= misleadingCount) {
         verdict = "FALSE";
-        explanation = "Relevant published fact-checks indicate that this claim is false.";
+        const strongestFalse = factChecks.find((factCheck) => rating(factCheck.rating) === "false");
+        explanation = strongestFalse
+          ? `Relevant published fact-check evidence indicates that this claim is false. Evidence: ${strongestFalse.claim || strongestFalse.title}. The original fact-check rates the claim as ${strongestFalse.rating}.`
+          : "Relevant published fact-checks indicate that this claim is false.";
       } else if (trueCount > falseCount && trueCount >= misleadingCount) {
         verdict = "VERIFIED";
         explanation = "Relevant published fact-checks support this claim.";
