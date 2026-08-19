@@ -57,12 +57,19 @@ function parseClaim(input: string): ClaimShape | null {
   clean = clean.replace(/^(?:scientists?|researchers?|experts?|doctors?|officials?)\s+(?:have\s+|had\s+)?(?:confirmed|proved|found|say|said|reported)\s+that\s+/i, "");
   if (!clean) return null;
   const negative = /\b(not|never|no longer|isn't|wasn't|aren't|weren't|doesn't|don't|didn't|cannot|can't|won't)\b/i.test(clean);
-  let match = clean.match(/^(.+?)\s+(?:is|was|are|were)\s+(?:the\s+)?(.+?)\s+of\s+(.+)$/i);
-  if (match) return { subject: match[1].trim(), predicate: match[2].trim(), object: match[3].trim(), relation: "is", negative };
-  match = clean.match(/^(.+?)\s+(?:is|was|are|were)\s+made\s+(?:primarily\s+|mostly\s+)?of\s+(.+)$/i);
+
+  // IMPORTANT: parse "is made of" before the generic "is ... of" pattern.
+  // Otherwise "The moon is made of cheese" is incorrectly parsed as:
+  // subject=moon, predicate=made, object=cheese, relation=is.
+  let match = clean.match(/^(.+?)\s+(?:is|was|are|were)\s+made\s+(?:primarily\s+|mostly\s+)?of\s+(.+)$/i);
   if (match) return { subject: match[1].trim(), predicate: "made of", object: match[2].trim(), relation: "made_of", negative };
+
+  match = clean.match(/^(.+?)\s+(?:is|was|are|were)\s+(?:the\s+)?(.+?)\s+of\s+(.+)$/i);
+  if (match) return { subject: match[1].trim(), predicate: match[2].trim(), object: match[3].trim(), relation: "is", negative };
+
   match = clean.match(/^(.+?)\s+(?:cures|cure|treats|treat|prevents|prevent)\s+(.+)$/i);
   if (match) return { subject: match[1].trim(), predicate: "cures", object: match[2].trim(), relation: "cures", negative };
+
   match = clean.match(/^(.+?)\s+(?:is|was|are|were)\s+(.+)$/i);
   if (match) return { subject: match[1].trim(), predicate: "is", object: match[2].trim(), relation: "other", negative };
   return null;
