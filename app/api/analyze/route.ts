@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { analyzeClaimWithAgents } from "@/lib/evidence-agent";
+import { analyzeClaimWithAgents } from "@/lib/evidence-agent-v2";
 
 export async function POST(request: Request) {
   try {
