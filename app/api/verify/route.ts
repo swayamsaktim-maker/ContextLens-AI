@@ -7,7 +7,6 @@ type Evidence = { title: string; source: string; url: string; relevance: number;
 type FactCheck = Evidence & { rating: string; claim: string; publisher: string };
 type Article = { title: string; description: string | null; url: string; source: string; relevance: number };
 type Shape = { subject: string; predicate: string; object: string; relation: "is" | "made_of" | "cures" | "other"; negative: boolean };
-type GoogleClaim = { text?: string; claimReview?: Array<{ publisher?: { name?: string; site?: string }; url?: string; title?: string; textualRating?: string }> };
 
 const OFFICIAL = [
   "gov.in","india.gov.in","pmindia.gov.in","pib.gov.in","presidentofindia.gov.in","eci.gov.in",
@@ -31,27 +30,23 @@ function parseClaim(input:string):Shape|null {
   s=s.replace(/^(scientists?|researchers?|experts?|doctors?|officials?)\s+(have\s+|had\s+)?(confirmed|proved|found|said|say|reported)\s+that\s+/i,"");
   if(!s)return null;
   const negative=/\b(not|never|no longer|isn't|wasn't|aren't|weren't|doesn't|don't|didn't|cannot|can't|won't)\b/i.test(s);
-  let m=s.match(/^(.+?)\s+(is|was|are|were)\s+(?:the\s+)?(.+?)\s+of\s+(.+)$/i);
-  if(m)return {subject:m[1].trim(),predicate:m[3].trim(),object:m[4].trim(),relation:"is",negative};
-  m=s.match(/^(.+?)\s+(is|was|are|were)\s+(?:primarily\s+|mostly\s+)?made\s+of\s+(.+)$/i);
+  let m=s.match(/^(.+?)\s+(is|was|are|were)\s+(?:primarily\s+|mostly\s+)?made\s+of\s+(.+)$/i);
   if(m)return {subject:m[1].trim(),predicate:"made of",object:m[3].trim(),relation:"made_of",negative};
+  m=s.match(/^(.+?)\s+(is|was|are|were)\s+(?:the\s+)?(.+?)\s+of\s+(.+)$/i);
+  if(m)return {subject:m[1].trim(),predicate:m[3].trim(),object:m[4].trim(),relation:"is",negative};
   m=s.match(/^(.+?)\s+(cures|cure|treats|treats|prevents|prevent)\s+(.+)$/i);
   if(m)return {subject:m[1].trim(),predicate:m[2].trim(),object:m[3].trim(),relation:"cures",negative};
   m=s.match(/^(.+?)\s+(is|was|are|were)\s+(.+)$/i);
   if(m)return {subject:m[1].trim(),predicate:m[2].trim(),object:m[3].trim(),relation:"other",negative};
   return null;
 }
-function claimText(s:Shape){return `${s.subject} ${s.predicate} ${s.object}`;}
 function rating(v:string):"support"|"contradict"|"neutral" { const x=n(v); if(/false|incorrect|wrong|fake|fabricated|debunked|baseless|misleading|mostly false|partly false|half false/.test(x))return "contradict"; if(/true|correct|accurate|verified|confirmed|mostly true|partly true/.test(x))return "support"; return "neutral"; }
-function ratingLabel(v:string){const x=n(v); if(/misleading|mostly false|partly false|half false/.test(x))return "MISLEADING"; if(/false|incorrect|wrong|fake|fabricated|debunked|baseless/.test(x))return "FALSE"; if(/true|correct|accurate|verified|confirmed/.test(x))return "VERIFIED"; return "UNVERIFIED";}
 
 function stanceFor(text:string, shape:Shape|null):Stance {
   if(!shape)return "neutral";
   const x=n(text), obj=n(shape.object), sub=n(shape.subject);
   if(!x.includes(sub.split(" ")[0]))return "neutral";
-  if(shape.negative){
-    if(x.includes(obj) && /\bnot\b|\bno\b|\bnever\b|\bfalse\b|\bincorrect\b|\bwrong\b|\bdebunk/.test(x)) return "support";
-  }
+  if(shape.negative && x.includes(obj) && /\bnot\b|\bno\b|\bnever\b|\bfalse\b|\bincorrect\b|\bwrong\b|\bdebunk/.test(x)) return "support";
   if(shape.relation==="made_of" && x.includes(sub.split(" ")[0])) {
     if(x.includes("rock")||x.includes("metal")||x.includes("silicate")||x.includes("regolith")) return "contradict";
     if(x.includes(obj)) return "support";
@@ -83,33 +78,33 @@ async function factChecks(key:string|undefined,claim:string,shape:Shape|null):Pr
   const unique=new Map<string,FactCheck>(); for(const x of all){const k=`${x.url}|${x.claim}`;if(!unique.has(k)||x.relevance>unique.get(k)!.relevance)unique.set(k,x);} return [...unique.values()].sort((a,b)=>b.relevance-a.relevance).slice(0,12);
 }
 async function wikipedia(claim:string,shape:Shape|null):Promise<Evidence[]> {
-  try { const qs=[shape?.subject||claim,claim,shape?`${shape.subject} ${shape.object}`:claim]; const results=await Promise.all(qs.map(q=>axios.get("https://en.wikipedia.org/w/api.php",{params:{action:"query",list:"search",srsearch:q,srlimit:5,format:"json",origin:"*"},timeout:7000}).then(r=>Array.isArray(r.data?.query?.search)?r.data.query.search:[]).catch(()=>[]))); const items=[...new Map(results.flat().filter((x:any)=>x?.title).map((x:any)=>[x.title,x])).values()].slice(0,8) as Array<{title:string,pageid?:number,snippet?:string}>; const out:Evidence[]=[]; for(const i of items){try{const r=await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(i.title.replace(/ /g,"_"))}`,{timeout:7000});const statement=String(r.data?.extract||i.snippet||"");out.push({title:i.title,source:"Wikipedia",url:i.pageid?`https://en.wikipedia.org/?curid=${i.pageid}`:`https://en.wikipedia.org/wiki/${encodeURIComponent(i.title.replace(/ /g,"_"))}`,relevance:similarity(claim,statement,i.title),quality:65,stance:stanceFor(statement,shape),statement,kind:"Knowledge"});}catch{}} return out.filter(x=>x.relevance>=25).sort((a,b)=>b.relevance-a.relevance);
+  try { const qs=[shape?.subject||claim,claim,shape?`${shape.subject} ${shape.object}`:claim]; const results=await Promise.all(qs.map(q=>axios.get("https://en.wikipedia.org/w/api.php",{params:{action:"query",list:"search",srsearch:q,srlimit:5,format:"json",origin:"*"},timeout:7000}).then(r=>Array.isArray(r.data?.query?.search)?r.data.query.search:[]).catch(()=>[]))); const items=[...new Map(results.flat().filter((x:unknown):x is {title:string,pageid?:number,snippet?:string}=>typeof x==="object"&&x!==null&&"title" in x&&typeof (x as {title?:unknown}).title==="string").map(x=>[x.title,x])).values()].slice(0,8); const out:Evidence[]=[]; for(const i of items){try{const r=await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(i.title.replace(/ /g,"_"))}`,{timeout:7000});const statement=String(r.data?.extract||i.snippet||"");out.push({title:i.title,source:"Wikipedia",url:i.pageid?`https://en.wikipedia.org/?curid=${i.pageid}`:`https://en.wikipedia.org/wiki/${encodeURIComponent(i.title.replace(/ /g,"_"))}`,relevance:similarity(claim,statement,i.title),quality:65,stance:stanceFor(statement,shape),statement,kind:"Knowledge"});}catch{}} return out.filter(x=>x.relevance>=25).sort((a,b)=>b.relevance-a.relevance);
   } catch{return []}
 }
-async function news(key:string|undefined,claim:string):Promise<Article[]> { if(!key)return []; try{const r=await axios.get("https://newsapi.org/v2/everything",{params:{q:claim,language:"en",sortBy:"relevancy",pageSize:10,apiKey:key},timeout:9000});const a:Array<any>=Array.isArray(r.data?.articles)?r.data.articles:[];return a.map(x=>({title:String(x.title||"Untitled article"),description:x.description||null,url:String(x.url||""),source:String(x.source?.name||"Unknown source"),relevance:similarity(claim,`${x.title||""} ${x.description||""}`,x.title||"")})).filter(x=>x.url&&x.relevance>=20).sort((a,b)=>b.relevance-a.relevance).slice(0,8);}catch{return []}}
+async function news(key:string|undefined,claim:string):Promise<Article[]> { if(!key)return []; try{const r=await axios.get("https://newsapi.org/v2/everything",{params:{q:claim,language:"en",sortBy:"relevancy",pageSize:10,apiKey:key},timeout:9000});const a:Array<{title?:string;description?:string|null;url?:string;source?:{name?:string}}>=Array.isArray(r.data?.articles)?r.data.articles:[];return a.map(x=>({title:String(x.title||"Untitled article"),description:x.description||null,url:String(x.url||""),source:String(x.source?.name||"Unknown source"),relevance:similarity(claim,`${x.title||""} ${x.description||""}`,x.title||"")})).filter(x=>x.url&&x.relevance>=20).sort((a,b)=>b.relevance-a.relevance).slice(0,8);}catch{return []}}
 
-function domainSeeds(claim:string,shape:Shape|null):Evidence[] {
+function domainSeeds(shape:Shape|null):Evidence[] {
   if(!shape)return [];
-  const q=n(`${shape.subject} ${shape.predicate} ${shape.object}`);
+  const q=n(`${shape.subject} ${shape.predicate} ${shape.object}`), object=n(shape.object);
   const out:Evidence[]=[];
   if(/moon/.test(q)) out.push(
-    {title:"Moon Composition & Structure",source:"NASA Science",url:"https://science.nasa.gov/moon/composition/",relevance:100,quality:98,stance:shape.relation==="made_of"&&/cheese|chocolate|wood|plastic|gas/.test(n(shape.object))?"contradict":shape.relation==="made_of"&&/rock|metal|silicate/.test(n(shape.object))?"support":"neutral",statement:"NASA describes the Moon as a rocky body with a crust, mantle and core; its surface includes rock and regolith.",kind:"Authoritative"},
-    {title:"Moon Facts",source:"NASA Science",url:"https://science.nasa.gov/moon/facts/",relevance:98,quality:98,stance:shape.relation==="made_of"&&/cheese|chocolate|wood|plastic|gas/.test(n(shape.object))?"contradict":"neutral",statement:"NASA's Moon facts describe the Moon as Earth's natural satellite and discuss its rocky composition and structure.",kind:"Authoritative"}
+    {title:"Moon Composition & Structure",source:"NASA Science",url:"https://science.nasa.gov/moon/composition/",relevance:100,quality:98,stance:shape.relation==="made_of"&&/cheese|chocolate|wood|plastic|gas/.test(object)?"contradict":shape.relation==="made_of"&&/rock|metal|silicate/.test(object)?"support":"neutral",statement:"NASA describes the Moon as a rocky body with a crust, mantle and core; its surface includes rock and regolith.",kind:"Authoritative"},
+    {title:"Moon Facts",source:"NASA Science",url:"https://science.nasa.gov/moon/facts/",relevance:98,quality:98,stance:shape.relation==="made_of"&&/cheese|chocolate|wood|plastic|gas/.test(object)?"contradict":"neutral",statement:"NASA's Moon facts describe the Moon as Earth's natural satellite and discuss its rocky composition and structure.",kind:"Authoritative"}
   );
   if(/lemon|lemon water|cancer/.test(q)) out.push({title:"Cancer Treatment and Evidence",source:"National Cancer Institute",url:"https://www.cancer.gov/about-cancer/treatment",relevance:95,quality:98,stance:shape.relation==="cures"?"contradict":"neutral",statement:"Cancer treatment is based on evidence-based medical approaches; lemon water is not an established cure for cancer.",kind:"Authoritative"});
   return out;
 }
 
-function scoreEvidence(claim:string,shape:Shape|null,items:Evidence[]) {
+function scoreEvidence(shape:Shape|null,items:Evidence[]) {
   const usable=items.filter(x=>x.stance!=="neutral"&&x.relevance>=35);
   let support=0, contradict=0;
   for(const e of usable){const w=(e.relevance/100)*(e.quality/100); if(e.stance==="support")support+=w; if(e.stance==="contradict")contradict+=w;}
+  if(shape?.negative){const originalSupport=support; support=contradict; contradict=originalSupport;}
   const total=support+contradict;
   if(!total) return {verdict:"UNVERIFIED" as Verdict,confidence:0,support,contradict,reason:"There is not enough claim-specific evidence to make a reliable truth determination."};
   const dominant=Math.max(support,contradict), other=Math.min(support,contradict); const agreement=dominant/(dominant+other);
   let confidence=clamp(55+agreement*45+Math.min(12,usable.length*2));
   if(dominant<0.35) confidence=Math.min(confidence,65);
-  if(shape?.negative){[support,contradict]=[contradict,support];}
   if(support>contradict*1.35) return {verdict:"VERIFIED" as Verdict,confidence,support,contradict,reason:"The strongest claim-specific evidence supports the submitted proposition."};
   if(contradict>support*1.35) return {verdict:"FALSE" as Verdict,confidence,support,contradict,reason:"The strongest claim-specific evidence contradicts the submitted proposition."};
   return {verdict:"MISLEADING" as Verdict,confidence:Math.min(confidence,84),support,contradict,reason:"Evidence exists on both sides or the available evidence supports only part of the proposition."};
@@ -125,17 +120,15 @@ export async function POST(req:Request){
     const searchKey=process.env.GOOGLE_SEARCH_API_KEY||process.env.GOOGLE_API_KEY;
     const cx=process.env.GOOGLE_SEARCH_ENGINE_ID||process.env.GOOGLE_CSE_ID;
     const newsKey=process.env.NEWS_API_KEY;
-
     const [fc,google,wiki,newsItems]=await Promise.all([
       factChecks(factKey,claim,shape),
       Promise.all([claim,shape?`${shape.subject} ${shape.predicate} ${shape.object} evidence`:claim,shape?`${shape.subject} ${shape.object} authoritative`:claim].map(q=>googleSearch(searchKey,cx,q))).then(x=>x.flat()),
       wikipedia(claim,shape),
       news(newsKey,claim)
     ]);
-    const seeds=domainSeeds(claim,shape);
-    const evidence=[...fc,...seeds,...google,...wiki].sort((a,b)=>(b.quality*b.relevance)-(a.quality*a.relevance));
+    const evidence=[...fc,...domainSeeds(shape),...google,...wiki].sort((a,b)=>(b.quality*b.relevance)-(a.quality*a.relevance));
     const unique=new Map<string,Evidence>(); for(const e of evidence){const k=`${e.url}|${e.title}`;if(!unique.has(k)||e.relevance>unique.get(k)!.relevance)unique.set(k,e);} const final=[...unique.values()].slice(0,20);
-    const result=scoreEvidence(claim,shape,final);
+    const result=scoreEvidence(shape,final);
     const factEvidence=fc.slice(0,12).map(x=>({claim:x.claim,publisher:x.publisher,title:x.title,rating:x.rating,url:x.url,relevance:x.relevance}));
     const authoritative=final.filter(x=>x.quality>=90).slice(0,8).map(x=>({title:x.title,source:x.source,url:x.url,relevance:x.relevance,statement:x.statement}));
     const supportive=final.filter(x=>x.stance==="support").sort((a,b)=>b.relevance-a.relevance)[0];
