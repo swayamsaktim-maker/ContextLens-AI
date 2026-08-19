@@ -19,6 +19,24 @@ export type FactCheckEvidence = {
   relevance: number;
 };
 
+type Interaction = {
+  steps?: Array<{
+    type?: string;
+    arguments?: { queries?: string[] };
+    content?: Array<{
+      type?: string;
+      text?: string;
+      annotations?: Array<{
+        type?: string;
+        url?: string;
+        title?: string;
+        start_index?: number;
+        end_index?: number;
+      }>;
+    }>;
+  }>;
+};
+
 type GeminiResponse = {
   candidates?: Array<{
     content?: { parts?: Array<{ text?: string }> };
@@ -45,7 +63,8 @@ const AUTHORITATIVE_DOMAINS = [
   "nasa.gov", "isro.gov.in", "esa.int", "noaa.gov", "nih.gov", "nci.nih.gov", "cancer.gov", "who.int",
   "cdc.gov", "fda.gov", "un.org", "gov.in", "india.gov.in", "pmindia.gov.in", "pib.gov.in", "eci.gov.in",
   "presidentofindia.gov.in", "whitehouse.gov", "usa.gov", "congress.gov", "gov.uk", "europa.eu", "canada.ca",
-  "australia.gov.au", "nationalacademies.org", "nature.com", "science.org", "pubmed.ncbi.nlm.nih.gov"
+  "australia.gov.au", "nationalacademies.org", "nature.com", "science.org", "pubmed.ncbi.nlm.nih.gov",
+  "pubmed.ncbi.nlm.nih.gov", "usgs.gov", "jpl.nasa.gov"
 ];
 
 function clamp(value: number): number {
@@ -101,7 +120,56 @@ function cleanSourceUrl(url: string): string {
   return String(url || "").trim();
 }
 
-function buildEvidenceFromGrounding(response: GeminiResponse): { sources: EvidenceSource[]; searchQueries: string[]; searchReport: string } {
+function buildEvidenceFromInteractions(response: Interaction): { sources: EvidenceSource[]; searchQueries: string[]; searchReport: string } {
+  const sources = new Map<string, EvidenceSource>();
+  const queries: string[] = [];
+  const reports: string[] = [];
+
+  for (const step of response.steps || []) {
+    if (step.type === "google_search_call") {
+      for (const query of step.arguments?.queries || []) {
+        if (query && !queries.includes(query)) queries.push(query);
+      }
+    }
+
+    if (step.type !== "model_output") continue;
+
+    for (const block of step.content || []) {
+      if (block.type !== "text") continue;
+      const text = String(block.text || "").trim();
+      if (text) reports.push(text);
+
+      for (const annotation of block.annotations || []) {
+        if (annotation.type !== "url_citation" || !annotation.url) continue;
+        const url = cleanSourceUrl(annotation.url);
+        if (!url) continue;
+        const start = Number(annotation.start_index ?? 0);
+        const end = Number(annotation.end_index ?? text.length);
+        const statement = text.slice(Math.max(0, start), Math.max(0, end)).trim() || text.slice(0, 1400);
+        const title = String(annotation.title || hostname(url) || "Google Search source");
+        const candidate: EvidenceSource = {
+          title,
+          source: hostname(url) || title,
+          url,
+          relevance: sourceWeight(url, title),
+          statement: statement.slice(0, 1400),
+        };
+        const existing = sources.get(url);
+        if (!existing || candidate.relevance > existing.relevance || (candidate.statement || "").length > (existing.statement || "").length) {
+          sources.set(url, candidate);
+        }
+      }
+    }
+  }
+
+  return {
+    sources: [...sources.values()].sort((a, b) => b.relevance - a.relevance).slice(0, 16),
+    searchQueries: queries,
+    searchReport: reports.join("\n\n").slice(0, 7000),
+  };
+}
+
+function buildEvidenceFromLegacyGrounding(response: GeminiResponse): { sources: EvidenceSource[]; searchQueries: string[]; searchReport: string } {
   const candidate = response.candidates?.[0];
   const metadata = candidate?.groundingMetadata;
   const chunks = metadata?.groundingChunks || [];
@@ -135,14 +203,30 @@ function buildEvidenceFromGrounding(response: GeminiResponse): { sources: Eviden
   for (const source of sources) {
     if (!unique.has(source.url) || (unique.get(source.url)?.relevance || 0) < source.relevance) unique.set(source.url, source);
   }
-  return { sources: [...unique.values()].sort((a, b) => b.relevance - a.relevance).slice(0, 12), searchQueries, searchReport: report };
+  return { sources: [...unique.values()].sort((a, b) => b.relevance - a.relevance).slice(0, 16), searchQueries, searchReport: report };
 }
 
-async function geminiGenerate(apiKey: string, model: string, prompt: string, googleSearch = false): Promise<GeminiResponse> {
+async function geminiInteraction(apiKey: string, model: string, prompt: string, googleSearch = false): Promise<Interaction> {
+  const response = await axios.post<Interaction>(
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    {
+      model,
+      input: prompt,
+      ...(googleSearch ? { tools: [{ type: "google_search" }] } : {}),
+    },
+    {
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      timeout: 45000,
+    },
+  );
+  return response.data;
+}
+
+async function geminiLegacy(apiKey: string, model: string, prompt: string, googleSearch = false): Promise<GeminiResponse> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const body: Record<string, unknown> = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.1, maxOutputTokens: 1800 },
+    generationConfig: { maxOutputTokens: 1800 },
   };
   if (googleSearch) body.tools = [{ google_search: {} }];
   const response = await axios.post<GeminiResponse>(url, body, {
@@ -154,28 +238,48 @@ async function geminiGenerate(apiKey: string, model: string, prompt: string, goo
 
 async function searchAgent(claim: string): Promise<{ sources: EvidenceSource[]; searchQueries: string[]; searchReport: string }> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured. Add a Gemini API key with Google Search grounding enabled.");
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured. Add a Gemini API key in .env.local.");
   const model = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
-  const prompt = `You are the ContextLens Evidence Search Agent. Your job is RETRIEVAL, not verdict prediction.
+  const prompt = `You are the ContextLens Evidence Search Agent. You are a retrieval agent, not the final judge.
 
-User claim:
+CLAIM TO VERIFY:
 "${claim}"
 
-Search Google thoroughly for evidence that can SUPPORT or CONTRADICT the exact proposition.
-Use multiple search queries when needed. Prefer primary and authoritative sources first (government, NASA/ISRO/ESA, WHO/NIH/CDC/FDA, universities, scientific journals, official government pages), then strong independent reporting and published fact-checks.
+MANDATORY: Use Google Search for this task. Search the live web and retrieve evidence about the exact proposition. Do not answer from memory.
 
-Important:
-- Do not assume that a Google Fact Check result must exist.
-- For scientific claims, actively search scientific/space/medical sources.
-- For identity, office, law, election, or government claims, search official government sources.
-- Look for evidence on BOTH sides so the next agent can compare support vs contradiction.
-- Do not invent sources, quotations, facts, or URLs.
-- Produce a concise factual evidence report. Mention the key fact each source establishes.
-- Do NOT give a final VERIFIED/FALSE verdict. The next agent will decide from your retrieved evidence.`;
+Search strategy:
+- Generate multiple focused queries when useful.
+- Search for evidence that SUPPORTS the claim and evidence that CONTRADICTS the claim.
+- For scientific/medical/space claims, prioritize NASA, ISRO, ESA, NOAA, NIH, CDC, FDA, WHO, universities, peer-reviewed journals, PubMed and other primary scientific sources.
+- For government, political, legal, election and public-office claims, prioritize official government pages and primary records.
+- For historical or general factual claims, prioritize museums, universities, encyclopedias, primary documents and strong independent reporting.
+- Use published fact-checks when they exist, but do not require an exact fact-check to exist.
 
-  const response = await geminiGenerate(apiKey, model, prompt, true);
-  return buildEvidenceFromGrounding(response);
+For every useful source, identify the concrete fact it establishes. A page merely mentioning the subject is NOT evidence for the proposition.
+
+Do not give a final TRUE/FALSE verdict. Return a factual evidence report grounded in the sources you found. Do not invent URLs, quotations or facts.`;
+
+  try {
+    const response = await geminiInteraction(apiKey, model, prompt, true);
+    const result = buildEvidenceFromInteractions(response);
+    if (result.sources.length > 0) return result;
+
+    // Compatibility fallback for accounts/models where the legacy endpoint is the available path.
+    const legacy = await geminiLegacy(apiKey, model, prompt, true);
+    return buildEvidenceFromLegacyGrounding(legacy);
+  } catch (error) {
+    console.error("ContextLens Google Search agent error:", error);
+    try {
+      const legacy = await geminiLegacy(apiKey, model, prompt, true);
+      const result = buildEvidenceFromLegacyGrounding(legacy);
+      if (result.sources.length > 0) return result;
+      return result;
+    } catch (legacyError) {
+      console.error("ContextLens legacy Google Search fallback error:", legacyError);
+      return { sources: [], searchQueries: [], searchReport: "The evidence search service did not return usable web sources." };
+    }
+  }
 }
 
 async function factCheckSearch(claim: string): Promise<FactCheckEvidence[]> {
@@ -205,7 +309,8 @@ async function factCheckSearch(claim: string): Promise<FactCheckEvidence[]> {
       }
     }
     return results.slice(0, 12);
-  } catch {
+  } catch (error) {
+    console.error("ContextLens Fact Check API error:", error);
     return [];
   }
 }
@@ -219,7 +324,7 @@ async function verifierAgent(claim: string, sources: EvidenceSource[], factCheck
     return {
       verdict: "UNVERIFIED",
       confidence: 0,
-      explanation: "The search agent could not retrieve sufficiently relevant evidence for this claim.",
+      explanation: "The evidence search did not return usable sources for this claim.",
       counterEvidence: "",
       evidenceSummary: "No usable evidence was retrieved.",
     };
@@ -243,46 +348,55 @@ async function verifierAgent(claim: string, sources: EvidenceSource[], factCheck
     url: item.url,
   }));
 
-  const prompt = `You are the ContextLens Verification Agent. You receive a user claim and evidence retrieved by a separate Google Search agent. Decide ONLY from the evidence below.
+  const prompt = `You are the ContextLens Verification Agent. You are a second-stage evidence judge. You MUST decide from the supplied evidence, not from memory.
 
 CLAIM:
 ${claim}
 
-WEB EVIDENCE:
+WEB EVIDENCE RETRIEVED BY GOOGLE SEARCH:
 ${JSON.stringify(evidenceDossier, null, 2)}
 
 PUBLISHED FACT-CHECK EVIDENCE:
 ${JSON.stringify(factDossier, null, 2)}
 
-SEARCH AGENT REPORT:
-${searchReport.slice(0, 5000)}
+SEARCH REPORT:
+${searchReport.slice(0, 7000)}
 
-Rules:
-1. Verify the exact proposition, not just overlapping words.
-2. Distinguish SUPPORT from CONTRADICTION. A source merely mentioning the subject is not evidence for the claim.
-3. Give higher weight to primary/official/scientific sources and multiple independent sources.
-4. A direct authoritative contradiction can justify FALSE even when no published fact-check exists.
-5. If evidence supports the claim, return VERIFIED.
-6. If evidence directly contradicts the claim, return FALSE.
-7. If the evidence says the claim is partly true, distorted, or missing important context, return MISLEADING.
-8. If evidence is genuinely insufficient or conflicting without a defensible winner, return UNVERIFIED.
-9. Confidence is confidence in the evidence-backed verdict, NOT the probability that the claim is true.
-10. Never invent evidence. Do not use facts that are not present in the dossier.
-11. For FALSE, counterEvidence MUST be a short factual sentence explaining what the evidence says instead. Example: for “Trump is President of India,” say that the White House identifies Donald Trump as President of the United States.
-12. For VERIFIED, explanation should state what the strongest evidence establishes.
+Decision rules:
+1. Evaluate the exact proposition and its important qualifiers: who, what, where, when and under what conditions.
+2. A source mentioning the same person/topic is NOT evidence for the claim.
+3. Strong primary, official and scientific sources get more weight than generic pages.
+4. Multiple independent sources that agree strengthen confidence.
+5. A direct authoritative contradiction can establish FALSE even when no published fact-check exists.
+6. Return VERIFIED when the retrieved evidence directly supports the proposition.
+7. Return FALSE when the retrieved evidence directly contradicts the proposition.
+8. Return MISLEADING when the core statement has some truth but is materially distorted, incomplete or out of context.
+9. Return UNVERIFIED only when the retrieved evidence is genuinely insufficient or irreconcilably conflicting.
+10. Confidence measures the strength of the evidence-backed decision, not the mathematical probability that the claim is true.
+11. Never turn absence of a fact-check into proof of falsehood.
+12. For FALSE, counterEvidence MUST state the relevant fact that contradicts the claim. Example: if the claim says “Trump is President of India,” the counter-evidence should say that the White House identifies Donald Trump as President of the United States.
+13. For scientific claims, explain the scientific fact that contradicts the claim. Example: for “the moon is made of cheese,” use the retrieved scientific evidence describing the Moon's rocky/metallic composition.
+14. Do not invent any source, URL, quotation or fact.
 
-Return ONLY valid JSON with exactly these keys:
+Return ONLY JSON:
 {
   "verdict": "VERIFIED" | "FALSE" | "MISLEADING" | "UNVERIFIED",
   "confidence": 0-100,
-  "explanation": "short human-readable reason",
-  "counterEvidence": "short factual contradiction or empty string",
-  "evidenceSummary": "one-sentence summary of the evidence strength"
+  "explanation": "one or two concise sentences explaining the decision",
+  "counterEvidence": "the key factual evidence that supports the FALSE/MISLEADING decision, or empty string",
+  "evidenceSummary": "one sentence describing source quality, relevance and agreement"
 }`;
 
   try {
-    const response = await geminiGenerate(apiKey, model, prompt, false);
-    const parsed = extractJson(extractText(response));
+    const response = await geminiInteraction(apiKey, model, prompt, false);
+    const text = (response.steps || [])
+      .filter((step) => step.type === "model_output")
+      .flatMap((step) => step.content || [])
+      .filter((block) => block.type === "text")
+      .map((block) => String(block.text || ""))
+      .join("\n")
+      .trim();
+    const parsed = extractJson(text);
     if (!parsed) throw new Error("Verifier returned invalid JSON.");
     return {
       verdict: parseVerdict(parsed.verdict),
@@ -291,25 +405,47 @@ Return ONLY valid JSON with exactly these keys:
       counterEvidence: String(parsed.counterEvidence || ""),
       evidenceSummary: String(parsed.evidenceSummary || "Evidence was evaluated from the retrieved sources."),
     };
-  } catch {
+  } catch (error) {
+    console.error("ContextLens verifier error:", error);
     return deterministicFallback(claim, sources, factChecks);
   }
 }
 
-function deterministicFallback(claim: string, sources: EvidenceSource[], factChecks: FactCheckEvidence[]): VerifierResult {
+function deterministicFallback(_claim: string, sources: EvidenceSource[], factChecks: FactCheckEvidence[]): VerifierResult {
   const falseChecks = factChecks.filter((item) => item.rating === "false");
   const trueChecks = factChecks.filter((item) => item.rating === "true");
   if (falseChecks.length > trueChecks.length && falseChecks.length > 0) {
-    return { verdict: "FALSE", confidence: clamp(82 + Math.min(14, falseChecks.length * 5)), explanation: `Published fact-check evidence contradicts this claim. ${falseChecks[0].claim}`, counterEvidence: falseChecks[0].claim, evidenceSummary: `Based on ${falseChecks.length} published false rating${falseChecks.length === 1 ? "" : "s"}.` };
+    return {
+      verdict: "FALSE",
+      confidence: clamp(82 + Math.min(14, falseChecks.length * 5)),
+      explanation: `Published fact-check evidence contradicts this claim. ${falseChecks[0].claim}`,
+      counterEvidence: falseChecks[0].claim,
+      evidenceSummary: `Based on ${falseChecks.length} published false rating${falseChecks.length === 1 ? "" : "s"}.`,
+    };
   }
   if (trueChecks.length > falseChecks.length && trueChecks.length > 0) {
-    return { verdict: "VERIFIED", confidence: clamp(82 + Math.min(14, trueChecks.length * 5)), explanation: `Published fact-check evidence supports this claim. ${trueChecks[0].claim}`, counterEvidence: "", evidenceSummary: `Based on ${trueChecks.length} published true rating${trueChecks.length === 1 ? "" : "s"}.` };
+    return {
+      verdict: "VERIFIED",
+      confidence: clamp(82 + Math.min(14, trueChecks.length * 5)),
+      explanation: `Published fact-check evidence supports this claim. ${trueChecks[0].claim}`,
+      counterEvidence: "",
+      evidenceSummary: `Based on ${trueChecks.length} published true rating${trueChecks.length === 1 ? "" : "s"}.`,
+    };
   }
-  const authoritative = sources.filter((source) => isAuthoritative(source.url));
-  if (authoritative.length >= 2) {
-    return { verdict: "VERIFIED", confidence: 84, explanation: "Multiple authoritative sources were retrieved, but the automated verifier could not produce a complete structured decision.", counterEvidence: "", evidenceSummary: `${authoritative.length} authoritative sources were retrieved.` };
-  }
-  return { verdict: "UNVERIFIED", confidence: sources.length ? 35 : 0, explanation: `The evidence search returned ${sources.length} source${sources.length === 1 ? "" : "s"}, but it was not strong enough for a defensible verdict.`, counterEvidence: "", evidenceSummary: "Evidence was retrieved but did not establish a clear proposition-level verdict." };
+
+  // Never infer VERIFIED merely because authoritative pages were found.
+  // They must be proposition-level evidence, which is the verifier's job.
+  return {
+    verdict: "UNVERIFIED",
+    confidence: sources.length ? 35 : 0,
+    explanation: sources.length
+      ? `The evidence search returned ${sources.length} source${sources.length === 1 ? "" : "s"}, but the structured verifier could not establish a defensible proposition-level decision.`
+      : "The evidence search did not return usable sources for this claim.",
+    counterEvidence: "",
+    evidenceSummary: sources.length
+      ? "Evidence was retrieved, but it did not establish a clear proposition-level verdict."
+      : "No usable evidence was retrieved.",
+  };
 }
 
 export async function analyzeClaimWithAgents(claim: string) {
@@ -317,7 +453,9 @@ export async function analyzeClaimWithAgents(claim: string) {
   const verification = await verifierAgent(claim, searchResult.sources, factChecks, searchResult.searchReport);
   const authoritativeSources = searchResult.sources.filter((source) => isAuthoritative(source.url));
   const evidenceStrength = verification.verdict === "UNVERIFIED"
-    ? (searchResult.sources.length ? "Evidence was retrieved, but the verifier found no defensible support or contradiction for the exact claim." : "No sufficiently relevant evidence was retrieved.")
+    ? (searchResult.sources.length
+      ? "Evidence was retrieved, but the verifier found no defensible support or contradiction for the exact claim."
+      : "No sufficiently relevant evidence was retrieved.")
     : verification.evidenceSummary;
 
   return {
@@ -334,7 +472,13 @@ export async function analyzeClaimWithAgents(claim: string) {
     factChecksFound: factChecks.length,
     authoritativeSources: authoritativeSources.slice(0, 10),
     factCheckEvidence: factChecks.slice(0, 8),
-    articles: searchResult.sources.filter((source) => !isAuthoritative(source.url)).slice(0, 10).map((source) => ({ title: source.title, description: source.statement || null, url: source.url, source: source.source, relevance: source.relevance })),
+    articles: searchResult.sources.filter((source) => !isAuthoritative(source.url)).slice(0, 10).map((source) => ({
+      title: source.title,
+      description: source.statement || null,
+      url: source.url,
+      source: source.source,
+      relevance: source.relevance,
+    })),
     evidenceStrength,
     searchQueries: searchResult.searchQueries,
     searchAgentReport: searchResult.searchReport,
