@@ -31,10 +31,6 @@ export async function POST(request: Request) {
 
     if (!claim) return NextResponse.json({ error: "Please provide a claim to analyze." }, { status: 400 });
 
-    console.log("Analyzing claim:", claim);
-    console.log("OCR text:", ocrText);
-
-    // Providers are independent. One API outage must not make the whole analysis fail.
     const [newsResult, factCheckResult, wiki] = await Promise.all([
       axios.get("https://newsapi.org/v2/everything", {
         params: { q: claim, language: "en", sortBy: "relevancy", pageSize: 10, apiKey: process.env.NEWS_API_KEY },
@@ -56,11 +52,11 @@ export async function POST(request: Request) {
     }));
     const relevantArticles = articles.filter((article: any) => article.relevance >= 55);
 
-    // Match fact-check records to the actual claim before using their ratings.
     const claimWords = claim.toLowerCase().replace(/[^a-z0-9\\s]/g, " ").split(/\\s+/).filter((w: string) => w.length > 2);
     const factChecks = (factCheckResult.data?.claims || []).filter((item: any) => {
       const text = `${item.text || ""} ${item.claimReview?.[0]?.title || ""}`.toLowerCase();
-      const matches = claimWords.filter((word: string) => text.split(/\\s+/).includes(word)).length;
+      const sourceWords = new Set(text.replace(/[^a-z0-9\\s]/g, " ").split(/\\s+/));
+      const matches = claimWords.filter((word: string) => sourceWords.has(word)).length;
       return claimWords.length <= 2 ? matches >= 1 : matches / claimWords.length >= 0.45;
     });
 
@@ -82,12 +78,15 @@ export async function POST(request: Request) {
     });
 
     const contradiction = wiki ? compositionContradiction(claim, wiki.extract) : false;
+    const knowledgeSupported = Boolean(wiki && !contradiction && articleRelevance(claim, wiki.title, wiki.extract) >= 65);
+
     const result = finalVerdict({
       falseCount: factStats.falseCount,
       trueCount: factStats.trueCount,
       misleadingCount: factStats.misleadingCount,
       contradiction,
       authoritative,
+      knowledgeSupported,
       relevantArticles: relevantArticles.length,
     });
 
@@ -104,7 +103,7 @@ export async function POST(request: Request) {
       evidenceAgreement: factStats.agreement,
       factChecksFound: factChecks.length,
       factCheckEvidence,
-      knowledgeEvidence: wiki ? { title: wiki.title, extract: wiki.extract, url: wiki.url, contradiction } : null,
+      knowledgeEvidence: wiki ? { title: wiki.title, extract: wiki.extract, url: wiki.url, contradiction, supported: knowledgeSupported } : null,
       diagnostics: {
         newsApiAvailable: !newsResult.error,
         factCheckApiAvailable: !factCheckResult.error,
